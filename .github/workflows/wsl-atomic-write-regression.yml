@@ -1,0 +1,53 @@
+name: WSL Atomic Write Regression
+
+on:
+  push:
+    branches:
+      - test/issue-6224-wsl-regression
+  workflow_dispatch:
+
+jobs:
+  reproduce:
+    name: Reproduce WSL atomic write
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup WSL
+        uses: Vampire/setup-wsl@v7
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+
+      - name: Prepare WSL test directory
+        shell: pwsh
+        run: |
+          wsl.exe -d Ubuntu-24.04 -- bash -lc "rm -rf /tmp/cc-switch-atomic-write-test && mkdir -p /tmp/cc-switch-atomic-write-test && chmod 0777 /tmp/cc-switch-atomic-write-test"
+          $testDir = "\\wsl.localhost\Ubuntu-24.04\tmp\cc-switch-atomic-write-test"
+          if (-not (Test-Path -LiteralPath $testDir)) {
+            throw "WSL UNC test directory is unavailable: $testDir"
+          }
+          "CC_SWITCH_WSL_TEST_DIR=$testDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: wsl-atomic-write-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Create frontend dist placeholder
+        shell: bash
+        run: mkdir -p dist
+
+      - name: Run WSL atomic-write regression test
+        run: >-
+          cargo test --manifest-path src-tauri/Cargo.toml
+          atomic_write_replaces_existing_wsl_unc_file
+          -- --ignored --nocapture

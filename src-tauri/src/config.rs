@@ -495,6 +495,22 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires CC_SWITCH_WSL_TEST_DIR to point to a WSL UNC directory"]
+    fn atomic_write_replaces_existing_wsl_unc_file() {
+        let dir = PathBuf::from(
+            std::env::var_os("CC_SWITCH_WSL_TEST_DIR").expect("CC_SWITCH_WSL_TEST_DIR must be set"),
+        );
+        let path = dir.join("config.json");
+        std::fs::write(&path, b"old contents").unwrap();
+
+        atomic_write(&path, b"new contents").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new contents");
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn derive_mcp_path_from_override_uses_config_dir_for_custom_path() {
         let override_dir = PathBuf::from("/tmp/profile/.claude");
