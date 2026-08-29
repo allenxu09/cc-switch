@@ -300,6 +300,27 @@ describe("common config snippet prototype-pollution guards", () => {
     expect(hasCommonConfigSnippet(merged, snippet)).toBe(true);
   });
 
+  it("sanitizes forbidden keys inside array elements", () => {
+    const snippet = JSON.stringify({
+      hooks: [{ ["__proto__"]: { polluted: "YES" } }],
+    });
+
+    const merged = updateCommonConfigSnippet("{}", snippet, true).updatedConfig;
+    const mergedAgain = updateCommonConfigSnippet(
+      merged,
+      snippet,
+      true,
+    ).updatedConfig;
+    expect(JSON.parse(mergedAgain).hooks).toEqual([{}]);
+
+    const removed = updateCommonConfigSnippet(
+      mergedAgain,
+      snippet,
+      false,
+    ).updatedConfig;
+    expect(JSON.parse(removed)).toEqual({});
+  });
+
   it("still reports a genuinely applied snippet as applied", () => {
     // 守卫不能把正常判定也一起改坏
     expect(
