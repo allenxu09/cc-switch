@@ -1348,6 +1348,42 @@ impl CodexOAuthManager {
         Self::sorted_accounts(&accounts, default_id.as_deref())
     }
 
+    /// Map legacy workspace-based provider bindings to their unique local
+    /// account IDs. Ambiguous workspaces are intentionally omitted because
+    /// multiple ChatGPT users can share one workspace.
+    pub(crate) async fn legacy_binding_account_id_aliases(&self) -> HashMap<String, String> {
+        let accounts = self.accounts.read().await;
+        let mut candidates: HashMap<String, Option<String>> = HashMap::new();
+
+        for (local_id, account) in accounts.iter() {
+            let Some(workspace_id) = account.chatgpt_account_id.as_deref() else {
+                continue;
+            };
+            if account
+                .id_token
+                .as_deref()
+                .and_then(crate::codex_config::extract_codex_id_token_user_identity)
+                .is_none()
+            {
+                continue;
+            }
+
+            candidates
+                .entry(workspace_id.to_string())
+                .and_modify(|candidate| *candidate = None)
+                .or_insert_with(|| Some(local_id.clone()));
+        }
+
+        candidates
+            .into_iter()
+            .filter_map(|(workspace_id, local_id)| {
+                local_id
+                    .filter(|local_id| local_id != &workspace_id)
+                    .map(|local_id| (workspace_id, local_id))
+            })
+            .collect()
+    }
+
     pub async fn remove_account(&self, account_id: &str) -> Result<(), CodexOAuthError> {
         log::info!("[CodexOAuth] 移除账号: {account_id}");
         // Wait for all in-flight refresh/adopt operations before deleting. New
@@ -2213,6 +2249,44 @@ mod tests {
         let accounts = manager.accounts.read().await;
         assert_eq!(accounts.get(&first.id).unwrap().refresh_token, "rt-first");
         assert_eq!(accounts.get(&second.id).unwrap().refresh_token, "rt-second");
+    }
+
+    #[tokio::test]
+    async fn legacy_binding_aliases_only_include_unique_ready_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+
+        manager
+            .add_test_account_with_workspace_and_access_token(
+                "legacy-workspace",
+                "legacy-workspace",
+                "stale-access-token",
+                None,
+            )
+            .await
+            .unwrap();
+
+        for (local_id, workspace_id, user) in [
+            ("local-a", "legacy-workspace", "user-a"),
+            ("local-b", "shared-workspace", "user-b"),
+            ("local-c", "shared-workspace", "user-c"),
+        ] {
+            let id_token = crate::codex_config::test_codex_id_token(user);
+            manager
+                .add_test_account_with_workspace_and_access_token(
+                    local_id,
+                    workspace_id,
+                    "access-token",
+                    Some(&id_token),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            manager.legacy_binding_account_id_aliases().await,
+            HashMap::from([("legacy-workspace".to_string(), "local-a".to_string())])
+        );
     }
 
     #[tokio::test]

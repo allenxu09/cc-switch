@@ -651,6 +651,22 @@ pub fn run() {
 
             let app_state = AppState::new(db);
 
+            let codex_binding_aliases = tauri::async_runtime::block_on(
+                app_state
+                    .codex_oauth_manager
+                    .legacy_binding_account_id_aliases(),
+            );
+            match app_state
+                .db
+                .repair_codex_oauth_binding_account_ids(&codex_binding_aliases)
+            {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Repaired {count} legacy Codex OAuth provider binding(s)")
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("Failed to repair Codex OAuth provider bindings: {error}"),
+            }
+
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
 

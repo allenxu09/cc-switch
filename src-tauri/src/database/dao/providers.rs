@@ -177,6 +177,78 @@ impl Database {
         }
     }
 
+    /// Repair Codex OAuth provider bindings written before local account IDs
+    /// were separated from upstream ChatGPT workspace IDs.
+    pub fn repair_codex_oauth_binding_account_ids(
+        &self,
+        aliases: &HashMap<String, String>,
+    ) -> Result<usize, AppError> {
+        if aliases.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = {
+            let mut stmt = tx
+                .prepare("SELECT id, meta FROM providers WHERE app_type = 'codex'")
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        let mut repaired = 0;
+        for (provider_id, meta_text) in rows {
+            let mut meta: serde_json::Value = serde_json::from_str(&meta_text)
+                .map_err(|e| AppError::Database(format!("Invalid provider meta JSON: {e}")))?;
+            let Some(binding) = meta
+                .get_mut("authBinding")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                continue;
+            };
+            if binding.get("source").and_then(serde_json::Value::as_str) != Some("managed_account")
+                || binding
+                    .get("authProvider")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("codex_oauth")
+            {
+                continue;
+            }
+            let Some(account_id) = binding.get("accountId").and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Some(local_account_id) = aliases.get(account_id) else {
+                continue;
+            };
+
+            binding.insert(
+                "accountId".to_string(),
+                serde_json::Value::String(local_account_id.clone()),
+            );
+            tx.execute(
+                "UPDATE providers SET meta = ?1 WHERE id = ?2 AND app_type = 'codex'",
+                params![
+                    serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?,
+                    provider_id
+                ],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+            repaired += 1;
+        }
+
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(repaired)
+    }
+
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
@@ -803,6 +875,54 @@ impl Database {
         self.save_provider(app_type_str, &provider)?;
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod codex_binding_repair_tests {
+    use super::*;
+    use crate::provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta};
+
+    #[test]
+    fn repairs_legacy_codex_oauth_binding_once() {
+        let db = Database::memory().expect("memory db");
+        let mut provider = Provider::with_id(
+            "managed-official".to_string(),
+            "Managed Official".to_string(),
+            serde_json::json!({"auth": {}}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: Some("legacy-workspace".to_string()),
+            }),
+            ..Default::default()
+        });
+        db.save_provider("codex", &provider).expect("save provider");
+
+        let aliases =
+            HashMap::from([("legacy-workspace".to_string(), "local-account".to_string())]);
+        assert_eq!(
+            db.repair_codex_oauth_binding_account_ids(&aliases)
+                .expect("repair binding"),
+            1
+        );
+        assert_eq!(
+            db.get_provider_by_id("managed-official", "codex")
+                .expect("read provider")
+                .expect("provider exists")
+                .meta
+                .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+                .as_deref(),
+            Some("local-account")
+        );
+        assert_eq!(
+            db.repair_codex_oauth_binding_account_ids(&aliases)
+                .expect("repair is idempotent"),
+            0
+        );
     }
 }
 
