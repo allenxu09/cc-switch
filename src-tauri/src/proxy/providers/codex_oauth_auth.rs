@@ -1365,6 +1365,10 @@ impl CodexOAuthManager {
                 .and_then(crate::codex_config::extract_codex_id_token_user_identity)
                 .is_none()
             {
+                candidates
+                    .entry(workspace_id.to_string())
+                    .and_modify(|candidate| *candidate = None)
+                    .or_insert(None);
                 continue;
             }
 
@@ -2252,7 +2256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_binding_aliases_only_include_unique_ready_accounts() {
+    async fn legacy_binding_aliases_only_include_uncontested_ready_accounts() {
         let temp = tempfile::tempdir().unwrap();
         let manager = CodexOAuthManager::new(temp.path().to_path_buf());
 
@@ -2270,6 +2274,7 @@ mod tests {
             ("local-a", "legacy-workspace", "user-a"),
             ("local-b", "shared-workspace", "user-b"),
             ("local-c", "shared-workspace", "user-c"),
+            ("local-d", "unique-workspace", "user-d"),
         ] {
             let id_token = crate::codex_config::test_codex_id_token(user);
             manager
@@ -2285,7 +2290,7 @@ mod tests {
 
         assert_eq!(
             manager.legacy_binding_account_id_aliases().await,
-            HashMap::from([("legacy-workspace".to_string(), "local-a".to_string())])
+            HashMap::from([("unique-workspace".to_string(), "local-d".to_string())])
         );
     }
 

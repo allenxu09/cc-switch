@@ -193,11 +193,15 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         let rows = {
             let mut stmt = tx
-                .prepare("SELECT id, meta FROM providers WHERE app_type = 'codex'")
+                .prepare("SELECT id, app_type, meta FROM providers")
                 .map_err(|e| AppError::Database(e.to_string()))?;
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(|e| AppError::Database(e.to_string()))?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -205,7 +209,7 @@ impl Database {
         };
 
         let mut repaired = 0;
-        for (provider_id, meta_text) in rows {
+        for (provider_id, app_type, meta_text) in rows {
             let mut meta: serde_json::Value = serde_json::from_str(&meta_text)
                 .map_err(|e| AppError::Database(format!("Invalid provider meta JSON: {e}")))?;
             let Some(binding) = meta
@@ -235,10 +239,11 @@ impl Database {
                 serde_json::Value::String(local_account_id.clone()),
             );
             tx.execute(
-                "UPDATE providers SET meta = ?1 WHERE id = ?2 AND app_type = 'codex'",
+                "UPDATE providers SET meta = ?1 WHERE id = ?2 AND app_type = ?3",
                 params![
                     serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?,
-                    provider_id
+                    provider_id,
+                    app_type
                 ],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -884,7 +889,7 @@ mod codex_binding_repair_tests {
     use crate::provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta};
 
     #[test]
-    fn repairs_legacy_codex_oauth_binding_once() {
+    fn repairs_legacy_codex_oauth_bindings_across_apps_once() {
         let db = Database::memory().expect("memory db");
         let mut provider = Provider::with_id(
             "managed-official".to_string(),
@@ -900,24 +905,29 @@ mod codex_binding_repair_tests {
             }),
             ..Default::default()
         });
-        db.save_provider("codex", &provider).expect("save provider");
+        for app_type in ["codex", "claude"] {
+            db.save_provider(app_type, &provider)
+                .expect("save provider");
+        }
 
         let aliases =
             HashMap::from([("legacy-workspace".to_string(), "local-account".to_string())]);
         assert_eq!(
             db.repair_codex_oauth_binding_account_ids(&aliases)
                 .expect("repair binding"),
-            1
+            2
         );
-        assert_eq!(
-            db.get_provider_by_id("managed-official", "codex")
-                .expect("read provider")
-                .expect("provider exists")
-                .meta
-                .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
-                .as_deref(),
-            Some("local-account")
-        );
+        for app_type in ["codex", "claude"] {
+            assert_eq!(
+                db.get_provider_by_id("managed-official", app_type)
+                    .expect("read provider")
+                    .expect("provider exists")
+                    .meta
+                    .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+                    .as_deref(),
+                Some("local-account")
+            );
+        }
         assert_eq!(
             db.repair_codex_oauth_binding_account_ids(&aliases)
                 .expect("repair is idempotent"),
