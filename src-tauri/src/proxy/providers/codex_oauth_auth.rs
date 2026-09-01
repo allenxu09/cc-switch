@@ -1383,6 +1383,8 @@ impl CodexOAuthManager {
             .filter_map(|(workspace_id, local_id)| {
                 local_id
                     .filter(|local_id| local_id != &workspace_id)
+                    // A binding storing a live local key already resolves; do not rewrite it.
+                    .filter(|_| !accounts.contains_key(&workspace_id))
                     .map(|local_id| (workspace_id, local_id))
             })
             .collect()
@@ -2260,15 +2262,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let manager = CodexOAuthManager::new(temp.path().to_path_buf());
 
-        manager
-            .add_test_account_with_workspace_and_access_token(
-                "legacy-workspace",
-                "legacy-workspace",
-                "stale-access-token",
-                None,
-            )
-            .await
-            .unwrap();
+        manager.accounts.write().await.insert(
+            "legacy-workspace".to_string(),
+            CodexAccountData {
+                account_id: "legacy-workspace".to_string(),
+                chatgpt_account_id: None,
+                email: Some("legacy@example.com".to_string()),
+                refresh_token: "legacy-refresh-token".to_string(),
+                authenticated_at: 1,
+                id_token: Some("legacy-id-token".to_string()),
+                token_updated_at_ms: 0,
+            },
+        );
 
         for (local_id, workspace_id, user) in [
             ("local-a", "legacy-workspace", "user-a"),
