@@ -107,7 +107,7 @@ import PromptPanel from "@/components/prompts/PromptPanel";
 import { PROMPT_APP_IDS } from "@/lib/query/prompts";
 import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { PluginsPage } from "@/components/plugins/PluginsPage";
-import { PLUGIN_APPS } from "@/lib/api/plugins";
+import { PLUGIN_APPS, isPluginApp } from "@/lib/api/plugins";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
 import { WhatsNewNotice } from "@/components/WhatsNewDialog";
@@ -1713,7 +1713,7 @@ function App() {
         return (
           <PluginsPage
             apps={PLUGIN_APPS.filter((app) => visibleApps[app])}
-            initialApp={activeApp === "codex" ? "codex" : "claude"}
+            initialApp={isPluginApp(activeApp) ? activeApp : "claude"}
           />
         );
       case "prompts":
