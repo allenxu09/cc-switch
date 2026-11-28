@@ -320,121 +320,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn dashes_to_dot_basic() {
-        assert_eq!(
-            normalize_to_copilot_id("claude-sonnet-4-6"),
-            Some("claude-sonnet-4.6".to_string())
-        );
-        assert_eq!(
-            normalize_to_copilot_id("claude-opus-4-6"),
-            Some("claude-opus-4.6".to_string())
-        );
-        assert_eq!(
-            normalize_to_copilot_id("claude-haiku-4-5"),
-            Some("claude-haiku-4.5".to_string())
-        );
-    }
-
-    #[test]
-    fn normalizes_model_ids_to_copilot_form() {
-        for (case, input_a, expected_a, input_b, expected_b) in [
-            (
-                "one_m_bracket_to_dash",
-                "claude-sonnet-4-6[1m]",
-                "claude-sonnet-4.6-1m",
-                "claude-opus-4-6[1m]",
-                "claude-opus-4.6-1m",
-            ),
-            (
-                "date_suffix_stripped",
-                "claude-haiku-4-5-20251001",
-                "claude-haiku-4.5",
-                "claude-sonnet-4-5-20250929",
-                "claude-sonnet-4.5",
-            ),
-            (
-                "case_insensitive_on_prefix_and_suffix",
-                "Claude-Sonnet-4-6",
-                "Claude-Sonnet-4.6",
-                "claude-sonnet-4-6[1M]",
-                "claude-sonnet-4.6-1m",
-            ),
-        ] {
-            assert_eq!(
-                normalize_to_copilot_id(input_a),
-                Some(expected_a.to_string()),
-                "{case}"
-            );
-            assert_eq!(
-                normalize_to_copilot_id(input_b),
-                Some(expected_b.to_string()),
-                "{case}"
-            );
-        }
-    }
-
-    #[test]
-    fn one_m_bracket_on_already_dotted() {
-        // claude-sonnet-4.6[1m] 走非 fast-path 分支（has_one_m_bracket=true），
-        // 应被改写为 -1m 形式
-        assert_eq!(
-            normalize_to_copilot_id("claude-sonnet-4.6[1m]"),
-            Some("claude-sonnet-4.6-1m".to_string())
-        );
-    }
-
-    #[test]
-    fn already_copilot_format_returns_none() {
-        assert_eq!(normalize_to_copilot_id("claude-sonnet-4.6"), None);
-        assert_eq!(normalize_to_copilot_id("claude-opus-4.6-1m"), None);
-        assert_eq!(normalize_to_copilot_id("claude-haiku-4.5"), None);
-    }
-
-    #[test]
-    fn non_claude_models_untouched() {
-        assert_eq!(normalize_to_copilot_id("gpt-5"), None);
-        assert_eq!(normalize_to_copilot_id("gpt-4o-mini"), None);
-        assert_eq!(normalize_to_copilot_id("o3"), None);
-        assert_eq!(normalize_to_copilot_id(""), None);
-    }
-
-    #[test]
-    fn legacy_three_part_versions_untouched() {
-        assert_eq!(normalize_to_copilot_id("claude-3-5-sonnet"), None);
-        assert_eq!(normalize_to_copilot_id("claude-3-5-sonnet-20241022"), None);
-    }
-
-    #[test]
-    fn bracket_one_m_with_date_combined() {
-        assert_eq!(
-            normalize_to_copilot_id("claude-haiku-4-5-20251001[1m]"),
-            Some("claude-haiku-4.5-1m".to_string())
-        );
-    }
-
-    #[test]
-    fn apply_rewrites_body() {
-        let body = json!({"model": "claude-sonnet-4-6", "max_tokens": 1024});
-        let out = apply_copilot_model_normalization(body);
-        assert_eq!(out["model"], "claude-sonnet-4.6");
-        assert_eq!(out["max_tokens"], 1024);
-    }
-
-    #[test]
-    fn apply_no_change_when_already_normalized() {
-        let body = json!({"model": "claude-sonnet-4.6"});
-        let out = apply_copilot_model_normalization(body);
-        assert_eq!(out["model"], "claude-sonnet-4.6");
-    }
-
-    #[test]
-    fn apply_handles_missing_model() {
-        let body = json!({"messages": []});
-        let out = apply_copilot_model_normalization(body);
-        assert!(out.get("model").is_none());
-    }
-
     fn model(id: &str) -> CopilotModel {
         CopilotModel {
             id: id.to_string(),
@@ -451,84 +336,224 @@ mod tests {
     }
 
     fn model_with_endpoints(id: &str, endpoints: &[&str]) -> CopilotModel {
-        let mut model = model(id);
-        model.supported_endpoints = endpoints
-            .iter()
-            .map(|endpoint| endpoint.to_string())
-            .collect();
-        model
+        let mut m = model(id);
+        m.supported_endpoints = endpoints.iter().map(|e| (*e).to_string()).collect();
+        m
     }
 
     #[test]
-    fn resolves_against_available_models() {
-        for (case, available_a, available_b, available_c, requested, expected) in [
-            (
-                "resolve_exact_match_after_normalize",
-                "claude-sonnet-4.6",
-                "claude-opus-4.6",
-                "claude-haiku-4.5",
-                "claude-sonnet-4-6",
-                "claude-sonnet-4.6",
-            ),
-            // 用户请求 opus 4.8 但 Copilot 账号只有 opus 4.6
-            (
-                "resolve_falls_back_to_highest_family_version",
-                "claude-opus-4.5",
-                "claude-opus-4.6",
-                "claude-sonnet-4.6",
-                "claude-opus-4.8",
-                "claude-opus-4.6",
-            ),
-            (
-                "resolve_prefers_1m_when_requested",
-                "claude-sonnet-4.6",
-                "claude-sonnet-4.6-1m",
-                "claude-opus-4.6",
-                "claude-sonnet-4-6[1m]",
-                "claude-sonnet-4.6-1m",
-            ),
+    fn normalize_to_copilot_id_and_apply_body_cases() {
+        for (input, expected) in [
+            ("claude-sonnet-4-6", Some("claude-sonnet-4.6")),
+            ("claude-opus-4-6", Some("claude-opus-4.6")),
+            ("claude-haiku-4-5", Some("claude-haiku-4.5")),
+            ("claude-sonnet-4-6[1m]", Some("claude-sonnet-4.6-1m")),
+            ("claude-opus-4-6[1m]", Some("claude-opus-4.6-1m")),
+            ("claude-haiku-4-5-20251001", Some("claude-haiku-4.5")),
+            ("claude-sonnet-4-5-20250929", Some("claude-sonnet-4.5")),
+            ("Claude-Sonnet-4-6", Some("Claude-Sonnet-4.6")),
+            ("claude-sonnet-4-6[1M]", Some("claude-sonnet-4.6-1m")),
+            ("claude-sonnet-4.6[1m]", Some("claude-sonnet-4.6-1m")),
+            ("claude-haiku-4-5-20251001[1m]", Some("claude-haiku-4.5-1m")),
+            ("claude-sonnet-4.6", None),
+            ("claude-opus-4.6-1m", None),
+            ("claude-haiku-4.5", None),
+            ("gpt-5", None),
+            ("gpt-4o-mini", None),
+            ("o3", None),
+            ("", None),
+            ("claude-3-5-sonnet", None),
+            ("claude-3-5-sonnet-20241022", None),
         ] {
-            let models = vec![model(available_a), model(available_b), model(available_c)];
             assert_eq!(
-                resolve_against_models(requested, &models),
-                Some(expected.to_string()),
-                "{case}"
+                normalize_to_copilot_id(input).as_deref(),
+                expected,
+                "{input}"
+            );
+        }
+
+        let rewritten = apply_copilot_model_normalization(
+            json!({"model": "claude-sonnet-4-6", "max_tokens": 1024}),
+        );
+        assert_eq!(rewritten["model"], "claude-sonnet-4.6");
+        assert_eq!(rewritten["max_tokens"], 1024);
+        assert_eq!(
+            apply_copilot_model_normalization(json!({"model": "claude-sonnet-4.6"}))["model"],
+            "claude-sonnet-4.6"
+        );
+        assert!(apply_copilot_model_normalization(json!({"messages": []}))
+            .get("model")
+            .is_none());
+    }
+
+    #[test]
+    fn resolve_against_models_and_catalog_semantics() {
+        let models = [
+            model("claude-sonnet-4.5"),
+            model("claude-sonnet-4.6"),
+            model("claude-sonnet-4.6-1m"),
+            model("claude-opus-4.5"),
+            model("claude-opus-4.6"),
+            model("claude-haiku-4.5"),
+            model("gpt-5.6"),
+        ];
+        for (requested, replacement, catalog_id) in [
+            ("claude-sonnet-4.6", None, Some("claude-sonnet-4.6")),
+            ("CLAUDE-SONNET-4.6", None, Some("claude-sonnet-4.6")),
+            (
+                "CLAUDE-SONNET-4-6",
+                Some("CLAUDE-SONNET-4.6"),
+                Some("claude-sonnet-4.6"),
+            ),
+            (
+                "claude-sonnet-4-6",
+                Some("claude-sonnet-4.6"),
+                Some("claude-sonnet-4.6"),
+            ),
+            (
+                "claude-sonnet-4.8",
+                Some("claude-sonnet-4.6"),
+                Some("claude-sonnet-4.6"),
+            ),
+            (
+                "claude-opus-4.8",
+                Some("claude-opus-4.6"),
+                Some("claude-opus-4.6"),
+            ),
+            (
+                "claude-sonnet-4-6[1M]",
+                Some("claude-sonnet-4.6-1m"),
+                Some("claude-sonnet-4.6-1m"),
+            ),
+            ("gpt-5.6", None, Some("gpt-5.6")),
+            ("gpt-5", None, None),
+            ("unknown", None, None),
+        ] {
+            assert_eq!(
+                resolve_against_models(requested, &models).as_deref(),
+                replacement,
+                "{requested}"
+            );
+            assert_eq!(
+                resolve_model(requested, &models)
+                    .as_ref()
+                    .map(|resolved| resolved.id.as_str()),
+                catalog_id,
+                "{requested}"
+            );
+        }
+
+        // 账号无 -1m 变体时降级到 base；完全没有该 family 时返回 None 让上游报错
+        let sonnet_only = [model("claude-sonnet-4.6"), model("claude-haiku-4.5")];
+        assert_eq!(
+            resolve_against_models("claude-sonnet-4-6[1m]", &sonnet_only).as_deref(),
+            Some("claude-sonnet-4.6")
+        );
+        assert_eq!(
+            resolve_against_models("claude-opus-4.6", &sonnet_only),
+            None
+        );
+
+        // 重复 ID 回退保留首条目录元数据
+        let first = model("claude-sonnet-4.6");
+        let mut second = model("CLAUDE-SONNET-4.6");
+        second.vendor = "second".to_string();
+        let dup_models = [first, second];
+        assert_eq!(
+            resolve_against_models("claude-sonnet-4.8", &dup_models).as_deref(),
+            Some("CLAUDE-SONNET-4.6")
+        );
+        let resolved = resolve_model("claude-sonnet-4.8", &dup_models).unwrap();
+        assert_eq!(resolved.id, "claude-sonnet-4.6");
+        assert_eq!(resolved.vendor, "anthropic");
+    }
+
+    #[test]
+    fn one_m_without_family_falls_back_to_same_version_base() {
+        // Fable 不在系列退回里；Copilot 只列普通 id，带 1M 时退回同版本，不升到 5.2。
+        let models = [
+            model("claude-fable-5.1"),
+            model("claude-fable-5.2"),
+            model("gpt-6-astra"),
+        ];
+        for client in [
+            "claude-fable-5-1[1M]",
+            "claude-fable-5.1[1m]",
+            "claude-fable-5.1-1M",
+        ] {
+            assert_eq!(
+                resolve_against_models(client, &models),
+                Some("claude-fable-5.1".to_string()),
+                "{client}"
+            );
+            assert_eq!(
+                resolve_model(client, &models).unwrap().id,
+                "claude-fable-5.1"
+            );
+        }
+        // 列表里有 1M 变体时照用；同版本也没有时照旧找不到。
+        let with_variant = [model("claude-fable-5.1"), model("claude-fable-5.1-1m")];
+        assert_eq!(
+            resolve_against_models("claude-fable-5-1[1M]", &with_variant),
+            Some("claude-fable-5.1-1m".to_string())
+        );
+        assert_eq!(
+            resolve_against_models("claude-fable-5-3[1M]", &models),
+            None
+        );
+        assert_eq!(
+            resolve_against_models("gpt-6-astra-1m", &models),
+            Some("gpt-6-astra".to_string())
+        );
+    }
+
+    #[test]
+    fn transport_selection_and_unsupported_endpoint_metadata() {
+        for (endpoint, protocol) in [
+            ("/responses", CopilotProtocol::Responses),
+            ("/v1/responses", CopilotProtocol::Responses),
+            ("/chat/completions", CopilotProtocol::Chat),
+            ("/v1/chat/completions", CopilotProtocol::Chat),
+        ] {
+            let advertised = model_with_endpoints("gpt-5.6", &[endpoint]);
+            assert_eq!(
+                resolve_model("gpt-5.6", &[advertised]).unwrap().transport,
+                Some(CopilotTransport {
+                    protocol,
+                    endpoint: endpoint.to_string(),
+                })
+            );
+        }
+
+        // 同时支持时优先 Responses，否则选 Chat
+        let mut both = model_with_endpoints("gpt-5.6", &["/chat/completions", "/responses"]);
+        both.vendor = "OpenAI".to_string();
+        assert_eq!(
+            resolve_model("gpt-5.6", &[both]).unwrap().transport,
+            Some(CopilotTransport {
+                protocol: CopilotProtocol::Responses,
+                endpoint: "/responses".to_string(),
+            })
+        );
+
+        // 仅 /v1/messages 或无端点元数据 -> Codex bridge 不支持（transport=None）
+        for candidate in [
+            model_with_endpoints("claude-opus-4.6", &["/v1/messages"]),
+            model("o3"),
+            model("claude-sonnet-4.6"),
+        ] {
+            let id = candidate.id.clone();
+            assert_eq!(
+                resolve_model(&id, &[candidate]).unwrap().transport,
+                None,
+                "{id}"
             );
         }
     }
 
     #[test]
-    fn resolve_returns_none_when_already_valid() {
-        let models = vec![model("claude-sonnet-4.6")];
-        assert_eq!(resolve_against_models("claude-sonnet-4.6", &models), None);
-    }
-
-    #[test]
-    fn resolve_chat_family_fallback_skips_messages_only_latest() {
-        let mut latest = model("claude-opus-4.7");
-        latest.supported_endpoints = vec!["/v1/messages".to_string()];
-        let mut compatible = model("claude-opus-4.6");
-        compatible.supported_endpoints = vec!["/chat/completions".to_string()];
-
-        let resolved = resolve_model_with_format(
-            "claude-opus-4.8",
-            &[latest, compatible],
-            CodexCopilotApiFormat::OpenaiChat,
-        )
-        .unwrap();
-
-        assert_eq!(resolved.id, "claude-opus-4.6");
-        assert_eq!(
-            resolved.transport,
-            Some(CopilotTransport {
-                protocol: CopilotProtocol::Chat,
-                endpoint: "/chat/completions".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn explicit_format_family_fallback_selects_highest_compatible_version() {
+    fn protocol_family_fallback_filters_by_format_and_preserves_legacy() {
+        // 显式格式跳过不兼容最新版，选最高兼容版本
         for (format, protocol, endpoint, incompatible_endpoint) in [
             (
                 CodexCopilotApiFormat::OpenaiChat,
@@ -549,7 +574,6 @@ mod tests {
                 model_with_endpoints("claude-opus-4.6", &[endpoint]),
             ];
             let resolved = resolve_model_with_format("claude-opus-5.0", &models, format).unwrap();
-
             assert_eq!(resolved.id, "claude-opus-4.7", "{format:?}");
             assert_eq!(
                 resolved.transport,
@@ -559,10 +583,8 @@ mod tests {
                 })
             );
         }
-    }
 
-    #[test]
-    fn auto_family_fallback_skips_unsupported_models_without_changing_legacy_resolution() {
+        // Auto 跳过 /v1/messages 与空端点模型，且不影响 legacy 解析路径
         let models = [
             model_with_endpoints("claude-opus-4.8", &["/v1/messages"]),
             model("claude-opus-4.7"),
@@ -572,7 +594,6 @@ mod tests {
         let resolved =
             resolve_model_with_format("claude-opus-5.0", &models, CodexCopilotApiFormat::Auto)
                 .unwrap();
-
         assert_eq!(resolved.id, "claude-opus-4.6");
         assert_eq!(
             resolved.transport,
@@ -589,10 +610,8 @@ mod tests {
         assert_eq!(legacy.id, "claude-opus-4.8");
         assert_eq!(legacy.vendor, "anthropic");
         assert_eq!(legacy.transport, None);
-    }
 
-    #[test]
-    fn protocol_family_fallback_returns_none_without_compatible_candidates() {
+        // 无兼容候选或空目录返回 None
         for (format, incompatible_endpoint) in [
             (CodexCopilotApiFormat::Auto, "/v1/messages"),
             (CodexCopilotApiFormat::OpenaiChat, "/responses"),
@@ -600,7 +619,7 @@ mod tests {
         ] {
             let mut gpt = model_with_endpoints("gpt-6-astra", &["/responses", "/chat/completions"]);
             gpt.vendor = "OpenAI".to_string();
-            let models = [
+            let catalog = [
                 model_with_endpoints("claude-opus-4.8", &[incompatible_endpoint]),
                 model("claude-opus-4.7"),
                 model_with_endpoints("claude-sonnet-4.6", &["/responses", "/chat/completions"]),
@@ -614,7 +633,7 @@ mod tests {
                 "",
             ] {
                 assert_eq!(
-                    resolve_model_with_format(requested, &models, format),
+                    resolve_model_with_format(requested, &catalog, format),
                     None,
                     "{requested}: {format:?}"
                 );
@@ -627,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_unsupported_models_keep_normalized_identity_and_first_metadata() {
+    fn exact_unsupported_models_and_duplicate_metadata_precedence() {
         for (id, vendor, requests) in [
             (
                 "claude-opus-4.7",
@@ -673,21 +692,50 @@ mod tests {
                 }
             }
         }
+
+        // 重复 ID 的协议资格以目录首条元数据为准
+        for (first_endpoint, duplicate_endpoint, expected_id) in [
+            ("/v1/messages", "/chat/completions", "claude-opus-4.6"),
+            ("/chat/completions", "/v1/messages", "claude-opus-4.7"),
+        ] {
+            let first = model_with_endpoints("claude-opus-4.7", &[first_endpoint]);
+            let mut duplicate = model_with_endpoints("CLAUDE-OPUS-4.7", &[duplicate_endpoint]);
+            duplicate.vendor = "second".to_string();
+            let older = model_with_endpoints("claude-opus-4.6", &["/chat/completions"]);
+            let resolved = resolve_model_with_format(
+                "claude-opus-4.8",
+                &[first, duplicate, older],
+                CodexCopilotApiFormat::OpenaiChat,
+            )
+            .unwrap();
+            assert_eq!(resolved.id, expected_id, "{first_endpoint}");
+            assert_eq!(resolved.vendor, "anthropic");
+            assert_eq!(
+                resolved.transport,
+                Some(CopilotTransport {
+                    protocol: CopilotProtocol::Chat,
+                    endpoint: "/chat/completions".to_string(),
+                })
+            );
+        }
     }
 
     #[test]
-    fn protocol_family_fallback_prefers_compatible_explicit_one_m_before_base() {
-        for format in [
+    fn one_m_and_large_context_family_fallback_rules() {
+        let endpoints = ["/responses", "/chat/completions"];
+        let formats = [
             CodexCopilotApiFormat::Auto,
             CodexCopilotApiFormat::OpenaiChat,
             CodexCopilotApiFormat::OpenaiResponses,
-        ] {
-            let mut natural =
-                model_with_endpoints("claude-opus-4.7", &["/responses", "/chat/completions"]);
+        ];
+
+        // 1M 请求：优先兼容的显式 -1m，缺失或不兼容时回退到自然大上下文 base
+        for format in formats {
+            let mut natural = model_with_endpoints("claude-opus-4.7", &endpoints);
             natural.context_window = Some(1_048_576);
             let mut models = [
                 model_with_endpoints("claude-opus-4.8-1m", &["/v1/messages"]),
-                model_with_endpoints("claude-opus-4.6-1m", &["/responses", "/chat/completions"]),
+                model_with_endpoints("claude-opus-4.6-1m", &endpoints),
                 natural,
             ];
             assert_eq!(
@@ -706,38 +754,33 @@ mod tests {
                 "{format:?}"
             );
         }
-    }
 
-    #[test]
-    fn ordinary_family_fallback_keeps_naturally_large_context_models() {
-        let endpoints = ["/responses", "/chat/completions"];
+        // 普通请求保留自然大上下文 base（不跳到显式 -1m）；带 [1m] 则选 -1m 或仅有的自然 1M base
         let mut natural = model_with_endpoints("claude-opus-4.7", &endpoints);
         natural.context_window = Some(1_048_576);
         let mut explicit = model_with_endpoints("claude-opus-4.8-1m", &endpoints);
         explicit.context_window = Some(1_048_576);
-        let models = [natural, explicit];
+        let models = [natural.clone(), explicit];
 
         assert_eq!(
-            resolve_against_models("claude-opus-4-5", &models),
-            Some("claude-opus-4.7".to_string())
+            resolve_against_models("claude-opus-4-5", &models).as_deref(),
+            Some("claude-opus-4.7")
         );
         assert_eq!(
             resolve_model("claude-opus-4-5", &models).unwrap().id,
             "claude-opus-4.7"
         );
         assert_eq!(
-            resolve_model("claude-opus-4.7", &models).unwrap().id,
-            "claude-opus-4.7"
-        );
-        assert_eq!(
             resolve_model("claude-opus-4-5[1m]", &models).unwrap().id,
             "claude-opus-4.8-1m"
         );
-        for format in [
-            CodexCopilotApiFormat::Auto,
-            CodexCopilotApiFormat::OpenaiChat,
-            CodexCopilotApiFormat::OpenaiResponses,
-        ] {
+        assert_eq!(
+            resolve_model("claude-opus-4-5[1M]", std::slice::from_ref(&natural))
+                .unwrap()
+                .id,
+            "claude-opus-4.7"
+        );
+        for format in formats {
             for (requested, expected) in [
                 ("claude-opus-4-5", "claude-opus-4.7"),
                 ("claude-opus-4.7", "claude-opus-4.7"),
@@ -751,256 +794,14 @@ mod tests {
                     "{requested}: {format:?}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn resolve_falls_back_to_base_when_1m_unavailable() {
-        // 账号没开 -1m 变体时降级到 base
-        let models = vec![model("claude-sonnet-4.6")];
-        assert_eq!(
-            resolve_against_models("claude-sonnet-4-6[1m]", &models),
-            Some("claude-sonnet-4.6".to_string())
-        );
-    }
-
-    #[test]
-    fn resolve_returns_none_when_family_absent() {
-        // 账号完全没有 opus 时不做强行替换，让上游报错
-        let models = vec![model("claude-sonnet-4.6"), model("claude-haiku-4.5")];
-        assert_eq!(resolve_against_models("claude-opus-4.6", &models), None);
-    }
-
-    #[test]
-    fn resolve_handles_non_claude_target() {
-        let models = vec![model("claude-sonnet-4.6")];
-        assert_eq!(resolve_against_models("gpt-5", &models), None);
-    }
-
-    #[test]
-    fn shared_model_match_preserves_rewrite_and_catalog_id_semantics() {
-        let models = vec![
-            model("claude-sonnet-4.5"),
-            model("claude-sonnet-4.6"),
-            model("claude-sonnet-4.6-1m"),
-            model("gpt-5.6"),
-        ];
-        let cases = [
-            ("claude-sonnet-4.6", None, Some("claude-sonnet-4.6")),
-            ("CLAUDE-SONNET-4.6", None, Some("claude-sonnet-4.6")),
-            (
-                "CLAUDE-SONNET-4-6",
-                Some("CLAUDE-SONNET-4.6"),
-                Some("claude-sonnet-4.6"),
-            ),
-            (
-                "claude-sonnet-4.8",
-                Some("claude-sonnet-4.6"),
-                Some("claude-sonnet-4.6"),
-            ),
-            (
-                "claude-sonnet-4-6[1M]",
-                Some("claude-sonnet-4.6-1m"),
-                Some("claude-sonnet-4.6-1m"),
-            ),
-            ("gpt-5.6", None, Some("gpt-5.6")),
-            ("unknown", None, None),
-        ];
-        for (requested, replacement, catalog_id) in cases {
             assert_eq!(
-                resolve_against_models(requested, &models).as_deref(),
-                replacement,
-                "{requested}"
-            );
-            assert_eq!(
-                resolve_model(requested, &models)
-                    .as_ref()
-                    .map(|resolved| resolved.id.as_str()),
-                catalog_id,
-                "{requested}"
-            );
-        }
-    }
-
-    #[test]
-    fn shared_model_match_preserves_first_duplicate_metadata() {
-        let first = model("claude-sonnet-4.6");
-        let mut second = model("CLAUDE-SONNET-4.6");
-        second.vendor = "second".to_string();
-        let models = [first, second];
-
-        assert_eq!(
-            resolve_against_models("claude-sonnet-4.8", &models).as_deref(),
-            Some("CLAUDE-SONNET-4.6")
-        );
-        let resolved = resolve_model("claude-sonnet-4.8", &models).unwrap();
-        assert_eq!(resolved.id, "claude-sonnet-4.6");
-        assert_eq!(resolved.vendor, "anthropic");
-    }
-
-    #[test]
-    fn protocol_family_fallback_uses_first_duplicate_metadata_for_eligibility() {
-        for (first_endpoint, duplicate_endpoint, expected_id) in [
-            ("/v1/messages", "/chat/completions", "claude-opus-4.6"),
-            ("/chat/completions", "/v1/messages", "claude-opus-4.7"),
-        ] {
-            let mut first = model("claude-opus-4.7");
-            first.supported_endpoints = vec![first_endpoint.to_string()];
-            let mut duplicate = model("CLAUDE-OPUS-4.7");
-            duplicate.vendor = "second".to_string();
-            duplicate.supported_endpoints = vec![duplicate_endpoint.to_string()];
-            let mut older = model("claude-opus-4.6");
-            older.supported_endpoints = vec!["/chat/completions".to_string()];
-            let models = [first, duplicate, older];
-
-            let resolved = resolve_model_with_format(
-                "claude-opus-4.8",
-                &models,
-                CodexCopilotApiFormat::OpenaiChat,
-            )
-            .unwrap();
-            assert_eq!(resolved.id, expected_id, "{first_endpoint}");
-            assert_eq!(resolved.vendor, "anthropic");
-            assert_eq!(
-                resolved.transport,
-                Some(CopilotTransport {
-                    protocol: CopilotProtocol::Chat,
-                    endpoint: "/chat/completions".to_string(),
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn transport_keeps_protocol_and_endpoint_together() {
-        for (endpoint, protocol) in [
-            ("/responses", CopilotProtocol::Responses),
-            ("/v1/responses", CopilotProtocol::Responses),
-            ("/chat/completions", CopilotProtocol::Chat),
-            ("/v1/chat/completions", CopilotProtocol::Chat),
-        ] {
-            let mut advertised = model("gpt-5.6");
-            advertised.supported_endpoints = vec![endpoint.to_string()];
-            assert_eq!(
-                resolve_model("gpt-5.6", &[advertised]).unwrap().transport,
-                Some(CopilotTransport {
-                    protocol,
-                    endpoint: endpoint.to_string(),
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_protocol_prefers_responses_then_chat() {
-        let mut both = model("gpt-5.6");
-        both.vendor = "OpenAI".to_string();
-        both.supported_endpoints = vec!["/chat/completions".to_string(), "/responses".to_string()];
-        assert_eq!(
-            resolve_model("gpt-5.6", &[both]).unwrap().transport,
-            Some(CopilotTransport {
-                protocol: CopilotProtocol::Responses,
-                endpoint: "/responses".to_string(),
-            })
-        );
-
-        let mut chat = model("claude-sonnet-4.6");
-        chat.supported_endpoints = vec!["/chat/completions".to_string()];
-        assert_eq!(
-            resolve_model("claude-sonnet-4.6", &[chat])
+                resolve_model_with_format(
+                    "claude-opus-4-5[1M]",
+                    std::slice::from_ref(&natural),
+                    format
+                )
                 .unwrap()
-                .transport,
-            Some(CopilotTransport {
-                protocol: CopilotProtocol::Chat,
-                endpoint: "/chat/completions".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn messages_only_model_is_not_supported_by_codex_bridge() {
-        let mut model = model("claude-opus-4.6");
-        model.supported_endpoints = vec!["/v1/messages".to_string()];
-
-        assert_eq!(
-            resolve_model("claude-opus-4.6", &[model])
-                .unwrap()
-                .transport,
-            None
-        );
-    }
-
-    #[test]
-    fn model_without_endpoint_metadata_is_not_supported_by_codex_bridge() {
-        let mut openai = model("o3");
-        openai.vendor = "OpenAI".to_string();
-        assert_eq!(resolve_model("o3", &[openai]).unwrap().transport, None);
-
-        assert_eq!(
-            resolve_model("claude-sonnet-4.6", &[model("claude-sonnet-4.6")])
-                .unwrap()
-                .transport,
-            None
-        );
-    }
-
-    #[test]
-    fn one_m_without_family_falls_back_to_same_version_base() {
-        // Fable 不在系列退回里；Copilot 只列普通 id，带 1M 时退回同版本，不升到 5.2。
-        let models = [
-            model("claude-fable-5.1"),
-            model("claude-fable-5.2"),
-            model("gpt-6-astra"),
-        ];
-        for client in [
-            "claude-fable-5-1[1M]",
-            "claude-fable-5.1[1m]",
-            "claude-fable-5.1-1M",
-        ] {
-            assert_eq!(
-                resolve_against_models(client, &models),
-                Some("claude-fable-5.1".to_string()),
-                "{client}"
-            );
-            assert_eq!(
-                resolve_model(client, &models).unwrap().id,
-                "claude-fable-5.1"
-            );
-        }
-        // 列表里有 1M 变体时照用；同版本也没有时照旧找不到。
-        let with_variant = [model("claude-fable-5.1"), model("claude-fable-5.1-1m")];
-        assert_eq!(
-            resolve_against_models("claude-fable-5-1[1M]", &with_variant),
-            Some("claude-fable-5.1-1m".to_string())
-        );
-        assert_eq!(
-            resolve_against_models("claude-fable-5-3[1M]", &models),
-            None
-        );
-        assert_eq!(
-            resolve_against_models("gpt-6-astra-1m", &models),
-            Some("gpt-6-astra".to_string())
-        );
-    }
-
-    #[test]
-    fn one_m_family_fallback_accepts_natural_context_without_explicit_variant() {
-        let mut one_m =
-            model_with_endpoints("claude-opus-4.7", &["/responses", "/chat/completions"]);
-        one_m.context_window = Some(1_000_000);
-        let models = [one_m];
-        let resolved = resolve_model("claude-opus-4-5[1M]", &models).unwrap();
-
-        assert_eq!(resolved.id, "claude-opus-4.7");
-        for format in [
-            CodexCopilotApiFormat::Auto,
-            CodexCopilotApiFormat::OpenaiChat,
-            CodexCopilotApiFormat::OpenaiResponses,
-        ] {
-            assert_eq!(
-                resolve_model_with_format("claude-opus-4-5[1M]", &models, format)
-                    .unwrap()
-                    .id,
+                .id,
                 "claude-opus-4.7",
                 "{format:?}"
             );

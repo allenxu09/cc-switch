@@ -671,7 +671,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn responses_classification_uses_the_latest_user_or_tool_input() {
+    fn classify_responses_request_cases() {
         let tool = json!({
             "type": "function_call_output",
             "call_id": "call-1",
@@ -707,14 +707,10 @@ mod tests {
             let body = json!({"input": input, "previous_response_id": "resp-previous"});
             let result = classify_responses_request(&body);
             assert_eq!(result.initiator, expected, "{body}");
-            assert!(!result.is_warmup);
-            assert!(!result.is_compact);
-            assert!(!result.is_subagent);
+            assert!(!result.is_warmup && !result.is_compact && !result.is_subagent);
         }
-    }
 
-    #[test]
-    fn responses_classification_does_not_use_claude_message_heuristics() {
+        // 不套用 Claude messages 启发式（compact / tool_result / subagent 标记一律忽略）
         for body in [
             json!({}),
             json!({
@@ -728,371 +724,333 @@ mod tests {
         ] {
             let result = classify_responses_request(&body);
             assert_eq!(result.initiator, "user");
-            assert!(!result.is_warmup);
-            assert!(!result.is_compact);
-            assert!(!result.is_subagent);
+            assert!(!result.is_warmup && !result.is_compact && !result.is_subagent);
         }
     }
 
-    // === classify_request 测试 ===
-
     #[test]
-    fn test_classify_user_text_message() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": "Hello, please help me write some code"}
-            ]
-        });
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "user");
-        assert!(!result.is_compact);
-    }
-
-    #[test]
-    fn test_classify_user_text_array_message() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Please explain this code"}
-                ]}
-            ]
-        });
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "user");
-    }
-
-    #[test]
-    fn test_classify_tool_result_only() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "tools": [{"name": "Read", "description": "Read a file", "input_schema": {}}],
-            "messages": [
-                {"role": "user", "content": "Read the file"},
-                {"role": "assistant", "content": [
-                    {"type": "text", "text": "I'll read that file."},
-                    {"type": "tool_use", "id": "toolu_123", "name": "Read", "input": {"path": "/tmp/test.rs"}}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_123", "content": "file contents here"}
-                ]}
-            ]
-        });
-        let result = classify_request(&body, true, true, false);
-        assert_eq!(result.initiator, "agent");
-        assert!(!result.is_warmup);
-    }
-
-    #[test]
-    fn test_classify_tool_result_with_text_block() {
-        // tool_result + text block（skill/edit hook/plan follow-up 的常见形态）
-        // 含有 tool_result → 视为工具续写 → agent
-        // 与 copilot-api 的 merge-then-classify 效果对齐
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_123", "content": "file contents"},
-                    {"type": "text", "text": "Now please refactor this code"}
-                ]}
-            ]
-        });
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "agent");
-    }
-
-    #[test]
-    fn test_classify_empty_messages() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": []
-        });
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "user");
-    }
-
-    #[test]
-    fn test_classify_no_messages() {
-        let body = json!({"model": "claude-sonnet-4-20250514"});
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "user");
-    }
-
-    #[test]
-    fn test_classify_compact_request_system_prompt() {
-        // compact 通过 system prompt 强特征检测
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "system": "You are a helpful AI assistant tasked with summarizing conversations. Please create a summary.",
-            "messages": [
-                {"role": "user", "content": "Here is the conversation history to summarize..."}
-            ]
-        });
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "agent");
-        assert!(result.is_compact);
-    }
-
-    #[test]
-    fn test_classify_compact_request_critical_marker() {
-        // compact 通过 CRITICAL 机器指令检测
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "text", "text": "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Summarize the conversation."}
-                ]}
-            ]
-        });
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "agent");
-        assert!(result.is_compact);
-    }
-
-    #[test]
-    fn test_classify_compact_disabled_by_config() {
-        // compact_detection=false 时，即使内容匹配也不标记为 compact
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "system": "You are a helpful AI assistant tasked with summarizing conversations.",
-            "messages": [
-                {"role": "user", "content": "Summarize"}
-            ]
-        });
-        let result = classify_request(&body, false, false, false); // compact_detection=false
-        assert_eq!(result.initiator, "user"); // 不被标记为 agent
-        assert!(!result.is_compact);
-    }
-
-    #[test]
-    fn test_no_false_positive_on_user_summarize_request() {
-        // P1 修复验证：用户手动输入 "summarize the conversation" 不应被误判为 compact
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": "Please summarize the conversation so far into a concise summary."}
-            ]
-        });
-        let result = classify_request(&body, false, true, false);
-        // 没有 system prompt 强特征，也没有 CRITICAL 指令 → 不是 compact → user
-        assert_eq!(result.initiator, "user");
-        assert!(!result.is_compact);
-    }
-
-    // === warmup 测试（与参考实现对齐） ===
-
-    #[test]
-    fn test_warmup_with_anthropic_beta_no_tools() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ]
-        });
-        // has_anthropic_beta=true, 无 tools → warmup
-        let result = classify_request(&body, true, true, false);
-        assert!(result.is_warmup);
-    }
-
-    #[test]
-    fn test_not_warmup_without_anthropic_beta() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ]
-        });
-        // has_anthropic_beta=false → 不是 warmup
-        let result = classify_request(&body, false, true, false);
-        assert!(!result.is_warmup);
-    }
-
-    #[test]
-    fn test_not_warmup_with_tools() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "tools": [{"name": "Read", "description": "Read a file", "input_schema": {}}],
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ]
-        });
-        // 有 tools → 不是 warmup（即使有 anthropic-beta）
-        let result = classify_request(&body, true, true, false);
-        assert!(!result.is_warmup);
-    }
-
-    #[test]
-    fn test_not_warmup_when_agent() {
-        // tool_result → agent → 不判定 warmup
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [
-                {"role": "user", "content": [
+    fn classify_request_initiator_and_warmup_rules() {
+        let tools = json!([{"name": "Read", "description": "Read a file", "input_schema": {}}]);
+        for (case, body, has_beta, expected_initiator, expected_warmup) in [
+            (
+                "user_text",
+                json!({"messages": [{"role": "user", "content": "Hello, write code"}]}),
+                false,
+                "user",
+                false,
+            ),
+            (
+                "user_text_array",
+                json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "Explain"}]}]}),
+                false,
+                "user",
+                false,
+            ),
+            (
+                "tool_result_only_with_tools",
+                json!({
+                    "tools": tools,
+                    "messages": [
+                        {"role": "user", "content": "Read the file"},
+                        {"role": "assistant", "content": [
+                            {"type": "text", "text": "Reading."},
+                            {"type": "tool_use", "id": "toolu_123", "name": "Read", "input": {}}
+                        ]},
+                        {"role": "user", "content": [
+                            {"type": "tool_result", "tool_use_id": "toolu_123", "content": "ok"}
+                        ]}
+                    ]
+                }),
+                true,
+                "agent",
+                false,
+            ),
+            (
+                "tool_result_with_text_block",
+                json!({"messages": [{"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_123", "content": "file"},
+                    {"type": "text", "text": "Now refactor"}
+                ]}]}),
+                false,
+                "agent",
+                false,
+            ),
+            (
+                "empty_messages",
+                json!({"messages": []}),
+                false,
+                "user",
+                false,
+            ),
+            (
+                "no_messages",
+                json!({"model": "claude-sonnet-4-20250514"}),
+                false,
+                "user",
+                false,
+            ),
+            // Warmup: has_anthropic_beta && no tools && initiator == user
+            (
+                "warmup_beta_no_tools",
+                json!({"messages": [{"role": "user", "content": "Hello"}]}),
+                true,
+                "user",
+                true,
+            ),
+            (
+                "not_warmup_with_tools",
+                json!({"tools": tools, "messages": [{"role": "user", "content": "Hello"}]}),
+                true,
+                "user",
+                false,
+            ),
+            (
+                "not_warmup_when_agent",
+                json!({"messages": [{"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": "toolu_123", "content": "ok"}
-                ]}
-            ]
-        });
-        let result = classify_request(&body, true, true, false);
-        assert_eq!(result.initiator, "agent");
-        assert!(!result.is_warmup);
+                ]}]}),
+                true,
+                "agent",
+                false,
+            ),
+        ] {
+            let result = classify_request(&body, has_beta, true, false);
+            assert_eq!(result.initiator, expected_initiator, "{case}");
+            assert_eq!(result.is_warmup, expected_warmup, "{case}");
+            assert!(!result.is_compact, "{case}");
+        }
     }
 
-    // === merge_tool_results 测试 ===
+    #[test]
+    fn compact_detection_and_toggle_rules() {
+        for (case, body, expected_compact) in [
+            (
+                "system_prompt_string",
+                json!({
+                    "system": "You are a helpful AI assistant tasked with summarizing conversations. Please summarize.",
+                    "messages": [{"role": "user", "content": "Here is the history..."}]
+                }),
+                true,
+            ),
+            (
+                "system_prompt_array",
+                json!({
+                    "system": [{"type": "text", "text": "You are a helpful AI assistant tasked with summarizing conversations."}],
+                    "messages": [{"role": "user", "content": "Summarize"}]
+                }),
+                true,
+            ),
+            (
+                "critical_marker_block",
+                json!({"messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Summarize."}
+                ]}]}),
+                true,
+            ),
+            (
+                "structural_markers",
+                json!({"messages": [{"role": "user", "content": "Summary:\n\nPending Tasks:\n- Fix\n\nCurrent Work:\n- Feat"}]}),
+                true,
+            ),
+            // 防误报：普通用户请求总结不算 compact
+            (
+                "user_summarize_not_compact",
+                json!({"messages": [{"role": "user", "content": "Please summarize the conversation so far into a concise summary."}]}),
+                false,
+            ),
+            (
+                "generic_summary_not_compact",
+                json!({"messages": [{"role": "user", "content": "Your task is to create a detailed summary of the conversation so far."}]}),
+                false,
+            ),
+            (
+                "ordinary_question",
+                json!({"messages": [{"role": "user", "content": "What is the weather today?"}]}),
+                false,
+            ),
+        ] {
+            assert_eq!(is_compact_request(&body), expected_compact, "{case}");
+            let classified = classify_request(&body, false, true, false);
+            assert_eq!(classified.is_compact, expected_compact, "{case}");
+            assert_eq!(
+                classified.initiator,
+                if expected_compact { "agent" } else { "user" },
+                "{case}"
+            );
+        }
+
+        // compact_detection=false 必须关闭检测
+        let compact_body = json!({
+            "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+            "messages": [{"role": "user", "content": "Summarize"}]
+        });
+        let disabled = classify_request(&compact_body, false, false, false);
+        assert_eq!(disabled.initiator, "user");
+        assert!(!disabled.is_compact);
+    }
 
     #[test]
-    fn test_merge_intra_message_tool_result_text() {
-        // 核心场景：消息内部 tool_result + text → text 被吸收进 tool_result
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "file contents"},
-                    {"type": "text", "text": "skill output here"}
-                ]}
-            ]
-        });
-        let result = merge_tool_results(body);
-        let content = result["messages"][0]["content"].as_array().unwrap();
-        // 应只剩 1 个 tool_result block（text 被吸收）
+    fn subagent_detection_and_toggle_rules() {
+        let user_marker_body = json!({"messages": [{"role": "user", "content": [{
+            "type": "text",
+            "text": "<system-reminder>\n{\"__SUBAGENT_MARKER__\":{\"session_id\":\"abc\",\"agent_id\":\"explore-1\"}}\n</system-reminder>\nSearch"
+        }]}]});
+        for (case, body, expected_subagent) in [
+            ("user_marker", user_marker_body.clone(), true),
+            (
+                "system_marker",
+                json!({
+                    "system": "Agent {\"__SUBAGENT_MARKER__\":{\"agent_id\":\"plan-1\"}}",
+                    "messages": [{"role": "user", "content": "Design plan"}]
+                }),
+                true,
+            ),
+            (
+                "metadata_user_id_agent",
+                json!({
+                    "metadata": {"user_id": "session_abc123_agent_explore-1"},
+                    "messages": [{"role": "user", "content": "Search"}]
+                }),
+                true,
+            ),
+            (
+                "normal_message",
+                json!({"messages": [{"role": "user", "content": "Hello"}]}),
+                false,
+            ),
+            (
+                "normal_metadata_user_id",
+                json!({
+                    "metadata": {"user_id": "session_abc123"},
+                    "messages": [{"role": "user", "content": "Hello"}]
+                }),
+                false,
+            ),
+        ] {
+            assert_eq!(detect_subagent(&body), expected_subagent, "{case}");
+            let classified = classify_request(&body, false, true, true);
+            assert_eq!(classified.is_subagent, expected_subagent, "{case}");
+            assert_eq!(
+                classified.initiator,
+                if expected_subagent { "agent" } else { "user" },
+                "{case}"
+            );
+        }
+
+        // subagent_detection=false 必须关闭检测
+        let disabled = classify_request(&user_marker_body, false, true, false);
+        assert_eq!(disabled.initiator, "user");
+        assert!(!disabled.is_subagent);
+    }
+
+    #[test]
+    fn merge_tool_results_intra_message_and_normal_cases() {
+        // 单消息内 tool_result + text -> text 吸收进 tool_result
+        let merged = merge_tool_results(json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "file contents"},
+                {"type": "text", "text": "skill output here"}
+            ]}]
+        }));
+        let content = merged["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "tool_result");
-        // tool_result 的 content 应包含原始内容 + 吸收的 text
-        let tr_content = content[0]["content"].as_str().unwrap();
-        assert!(tr_content.contains("file contents"));
-        assert!(tr_content.contains("skill output here"));
-    }
+        let text = content[0]["content"].as_str().unwrap();
+        assert!(text.contains("file contents") && text.contains("skill output here"));
 
-    #[test]
-    fn test_merge_intra_message_equal_count() {
         // 数量相等：一一对应合并
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "result1"},
-                    {"type": "text", "text": "text1"},
-                    {"type": "tool_result", "tool_use_id": "t2", "content": "result2"},
-                    {"type": "text", "text": "text2"}
-                ]}
-            ]
-        });
-        let result = merge_tool_results(body);
-        let content = result["messages"][0]["content"].as_array().unwrap();
+        let equal = merge_tool_results(json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "result1"},
+                {"type": "text", "text": "text1"},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "result2"},
+                {"type": "text", "text": "text2"}
+            ]}]
+        }));
+        let content = equal["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert!(content[0]["content"].as_str().unwrap().contains("text1"));
         assert!(content[1]["content"].as_str().unwrap().contains("text2"));
-    }
 
-    #[test]
-    fn test_merge_intra_message_empty_text_ignored() {
         // 空 text block 不追加内容
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
-                    {"type": "text", "text": ""}
-                ]}
-            ]
-        });
-        let result = merge_tool_results(body);
-        let content = result["messages"][0]["content"].as_array().unwrap();
+        let empty_text = merge_tool_results(json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
+                {"type": "text", "text": ""}
+            ]}]
+        }));
+        let content = empty_text["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
-        // 空 text 不改变原始 content
         assert_eq!(content[0]["content"], "result");
-    }
 
-    #[test]
-    fn test_merge_intra_skips_other_block_types() {
-        // 有非 tool_result/text 的 block → 跳过整条消息
-        let body = json!({
+        // 含非 tool_result/text 块（image）-> 跳过整条消息
+        let with_image = json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
+                {"type": "image", "source": {"data": "..."}},
+                {"type": "text", "text": "caption"}
+            ]}]
+        });
+        assert_eq!(merge_tool_results(with_image.clone()), with_image);
+
+        // 普通消息不变
+        let normal = json!({
             "messages": [
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
-                    {"type": "image", "source": {"data": "..."}},
-                    {"type": "text", "text": "caption"}
-                ]}
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+                {"role": "user", "content": "How are you?"}
             ]
         });
-        let result = merge_tool_results(body);
-        let content = result["messages"][0]["content"].as_array().unwrap();
-        // 未合并，保持原样 3 个 block
-        assert_eq!(content.len(), 3);
+        assert_eq!(merge_tool_results(normal.clone()), normal);
     }
 
     #[test]
-    fn test_merge_cross_message_consecutive() {
-        // 跨消息合并：连续 tool_result-only 用户消息
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "Read files"},
-                {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
-                    {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "file1"}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t2", "content": "file2"}
-                ]}
-            ]
-        });
-        let result = merge_tool_results(body);
-        let messages = result["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 3);
-        let merged_content = messages[2]["content"].as_array().unwrap();
-        assert_eq!(merged_content.len(), 2);
-    }
-
-    #[test]
-    fn isolated_tool_results_keep_metadata_and_history_allocations() {
-        let body = serde_json::json!({"messages": [
+    fn merge_tool_results_with_changes_tracks_merges_without_cloning_history() {
+        // 孤立 tool_result 不触发合并，不重分配大历史字符串，且保留 metadata
+        let isolated = json!({"messages": [
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "x".repeat(1024 * 1024)},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "one", "content": "result"}], "metadata": {"keep": true}},
             {"role": "assistant", "content": "next"},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "two", "content": "result"}]}
         ]});
-        let expected = body.clone();
-        let history = body["messages"][1]["content"].as_str().unwrap().as_ptr();
-
-        let (result, changed) = merge_tool_results_with_changes(body);
-
+        let expected = isolated.clone();
+        let history_ptr = isolated["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
+        let (result, changed) = merge_tool_results_with_changes(isolated);
         assert!(!changed);
         assert_eq!(result, expected);
         assert_eq!(
             result["messages"][1]["content"].as_str().unwrap().as_ptr(),
-            history
+            history_ptr
         );
-    }
 
-    #[test]
-    fn only_actual_tool_result_merges_mark_the_body_changed() {
-        let single = serde_json::json!({"role": "user", "content": [
+        // 连续 tool_result-only 用户消息跨消息合并并标记 changed=true，同时保留前面孤立消息的 metadata
+        let single = json!({"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": "one", "content": "result"}
         ], "metadata": {"keep": true}});
-        let body = serde_json::json!({"messages": [
+        let (result, changed) = merge_tool_results_with_changes(json!({"messages": [
             single,
             {"role": "assistant", "content": "next"},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "two", "content": "second"}]},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "three", "content": "third"}]}
-        ]});
-        let (result, changed) = merge_tool_results_with_changes(body);
+        ]}));
         assert!(changed);
         assert_eq!(result["messages"].as_array().unwrap().len(), 3);
         assert_eq!(result["messages"][0], single);
         assert_eq!(result["messages"][2]["content"][0]["tool_use_id"], "two");
         assert_eq!(result["messages"][2]["content"][1]["tool_use_id"], "three");
 
-        let (result, changed) = merge_tool_results_with_changes(serde_json::json!({"messages": [{
+        // 消息内合并同样必须标记 changed=true（后续需继续做隐私过滤）
+        let (result, changed) = merge_tool_results_with_changes(json!({"messages": [{
             "role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "one", "content": "result"},
                 {"type": "text", "text": "hook reminder"}
             ]
         }]}));
-        assert!(
-            changed,
-            "an in-message merge still requires privacy filtering"
-        );
+        assert!(changed);
         assert_eq!(
             result["messages"][0]["content"].as_array().unwrap().len(),
             1
@@ -1100,603 +1058,191 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_does_not_affect_normal_messages() {
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi!"},
-                {"role": "user", "content": "How are you?"}
-            ]
-        });
-        let result = merge_tool_results(body.clone());
-        assert_eq!(result["messages"], body["messages"]);
-    }
+    fn deterministic_request_and_interaction_id_invariants() {
+        let hello = json!({"messages": [{"role": "user", "content": "Hello"}]});
+        let goodbye = json!({"messages": [{"role": "user", "content": "Goodbye"}]});
 
-    // === deterministic_request_id 测试 ===
+        let req1 = deterministic_request_id(&hello, "session1");
+        assert!(Uuid::parse_str(&req1).is_ok());
+        assert_eq!(req1, deterministic_request_id(&hello, "session1"));
+        assert_ne!(req1, deterministic_request_id(&goodbye, "session1"));
+        assert_ne!(req1, deterministic_request_id(&hello, "session2"));
 
-    #[test]
-    fn test_deterministic_id_stable() {
-        let body = json!({
-            "model": "claude-sonnet-4-20250514",
-            "messages": [{"role": "user", "content": "Hello"}]
-        });
-        let id1 = deterministic_request_id(&body, "session1");
-        let id2 = deterministic_request_id(&body, "session1");
-        assert_eq!(id1, id2);
-    }
-
-    #[test]
-    fn test_deterministic_id_varies_by_content() {
-        let body1 = json!({
-            "messages": [{"role": "user", "content": "Hello"}]
-        });
-        let body2 = json!({
-            "messages": [{"role": "user", "content": "Goodbye"}]
-        });
-        let id1 = deterministic_request_id(&body1, "session1");
-        let id2 = deterministic_request_id(&body2, "session1");
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_deterministic_id_varies_by_session() {
-        let body = json!({
-            "messages": [{"role": "user", "content": "Hello"}]
-        });
-        let id1 = deterministic_request_id(&body, "session1");
-        let id2 = deterministic_request_id(&body, "session2");
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_deterministic_id_ignores_tool_result() {
-        // tool_result 内容不同，但 user text 相同 → 相同 ID
-        let body1 = json!({
-            "messages": [
+        // tool_result 内容变化但最终用户文本相同 -> 相同 request ID
+        let with_tool = |v: &str| {
+            json!({"messages": [
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi"},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "version_A"}
-                ]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": v}]},
                 {"role": "user", "content": "do something"}
-            ]
-        });
-        let body2 = json!({
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi"},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "version_B"}
-                ]},
-                {"role": "user", "content": "do something"}
-            ]
-        });
-        let id1 = deterministic_request_id(&body1, "s");
-        let id2 = deterministic_request_id(&body2, "s");
-        assert_eq!(id1, id2);
-    }
+            ]})
+        };
+        assert_eq!(
+            deterministic_request_id(&with_tool("version_A"), "s"),
+            deterministic_request_id(&with_tool("version_B"), "s")
+        );
 
-    #[test]
-    fn test_deterministic_id_fallback_when_no_user_content() {
-        // 无用户消息 → 退化为随机 UUID（每次不同）
-        let body = json!({
-            "messages": [
-                {"role": "assistant", "content": "Hi"}
-            ]
-        });
-        let id1 = deterministic_request_id(&body, "s");
-        let id2 = deterministic_request_id(&body, "s");
-        // 随机 UUID，每次应不同
-        assert_ne!(id1, id2);
-    }
+        // 无用户文本时退化为随机 UUID
+        let assistant_only = json!({"messages": [{"role": "assistant", "content": "Hi"}]});
+        assert_ne!(
+            deterministic_request_id(&assistant_only, "s"),
+            deterministic_request_id(&assistant_only, "s")
+        );
 
-    #[test]
-    fn test_deterministic_id_is_valid_uuid() {
-        let body = json!({
-            "messages": [{"role": "user", "content": "test"}]
-        });
-        let id = deterministic_request_id(&body, "session");
-        assert!(Uuid::parse_str(&id).is_ok());
-    }
-
-    // === deterministic_interaction_id 测试 ===
-
-    #[test]
-    fn test_interaction_id_stable_for_same_session() {
-        let id1 = deterministic_interaction_id("session_abc");
-        let id2 = deterministic_interaction_id("session_abc");
-        assert_eq!(id1, id2);
-    }
-
-    #[test]
-    fn test_interaction_id_differs_across_sessions() {
-        let id1 = deterministic_interaction_id("session_abc");
-        let id2 = deterministic_interaction_id("session_def");
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_interaction_id_differs_from_request_id() {
-        let body = json!({
-            "messages": [{"role": "user", "content": "Hello"}]
-        });
-        let interaction = deterministic_interaction_id("session_abc").unwrap();
-        let request = deterministic_request_id(&body, "session_abc");
-        assert_ne!(interaction, request);
-    }
-
-    #[test]
-    fn test_interaction_id_empty_session_is_none() {
-        // 无 session 时不应生成 interaction ID（避免碎片化）
+        // Interaction ID：同 session 稳定、跨 session 不同、与 request ID 域隔离、空 session 返回 None
+        let inter1 = deterministic_interaction_id("session1").unwrap();
+        assert!(Uuid::parse_str(&inter1).is_ok());
+        assert_eq!(
+            Some(inter1.clone()),
+            deterministic_interaction_id("session1")
+        );
+        assert_ne!(
+            Some(inter1.clone()),
+            deterministic_interaction_id("session2")
+        );
+        assert_ne!(inter1, req1);
         assert!(deterministic_interaction_id("").is_none());
     }
 
     #[test]
-    fn test_interaction_id_is_valid_uuid() {
-        let id = deterministic_interaction_id("test_session").unwrap();
-        assert!(Uuid::parse_str(&id).is_ok());
-    }
-
-    // === compact 检测增强测试 ===
-
-    #[test]
-    fn test_compact_detection_system_prompt() {
-        let body = json!({
-            "system": "You are a helpful AI assistant tasked with summarizing conversations. Please provide a concise summary.",
+    fn sanitize_orphan_tool_results_rules() {
+        // 匹配保留，孤立转为 text
+        let mixed = sanitize_orphan_tool_results(json!({
             "messages": [
-                {"role": "user", "content": "Here is the conversation to summarize..."}
-            ]
-        });
-        assert!(is_compact_request(&body));
-    }
-
-    #[test]
-    fn test_compact_detection_critical_keyword() {
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Summarize this conversation."}
-            ]
-        });
-        assert!(is_compact_request(&body));
-    }
-
-    #[test]
-    fn test_compact_detection_structural_markers() {
-        // Claude Code compact 特有的结构标记
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "Summary of conversation:\n\nPending Tasks:\n- Fix bug\n\nCurrent Work:\n- Implementing feature"}
-            ]
-        });
-        assert!(is_compact_request(&body));
-    }
-
-    #[test]
-    fn test_compact_no_false_positive_on_generic_summary() {
-        // 通用短语不应触发 compact 检测
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "Your task is to create a detailed summary of the conversation so far."}
-            ]
-        });
-        assert!(!is_compact_request(&body));
-    }
-
-    #[test]
-    fn test_compact_detection_negative() {
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "What is the weather today?"}
-            ]
-        });
-        assert!(!is_compact_request(&body));
-    }
-
-    #[test]
-    fn test_compact_detection_system_array() {
-        let body = json!({
-            "system": [
-                {"type": "text", "text": "You are a helpful AI assistant tasked with summarizing conversations."}
-            ],
-            "messages": [
-                {"role": "user", "content": "Summarize"}
-            ]
-        });
-        assert!(is_compact_request(&body));
-    }
-
-    // === detect_subagent 测试 ===
-
-    #[test]
-    fn test_detect_subagent_with_marker_in_user_message() {
-        let body = json!({
-            "messages": [
+                {"role": "user", "content": "Help"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tool_1", "name": "read", "input": {}}]},
                 {"role": "user", "content": [
-                    {"type": "text", "text": "<system-reminder>\n{\"__SUBAGENT_MARKER__\":{\"session_id\":\"abc123\",\"agent_id\":\"explore-1\",\"agent_type\":\"Explore\"}}\n</system-reminder>\nPlease search the codebase for auth handlers"}
+                    {"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "tool_orphan", "content": "orphan"}
                 ]}
             ]
-        });
-        assert!(detect_subagent(&body));
-    }
+        }));
+        let last = mixed["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(last[0]["type"], "tool_result");
+        assert_eq!(last[1]["type"], "text");
+        assert!(last[1]["text"].as_str().unwrap().contains("tool_orphan"));
 
-    #[test]
-    fn test_detect_subagent_with_marker_in_system() {
-        let body = json!({
-            "system": "You are an agent. {\"__SUBAGENT_MARKER__\":{\"session_id\":\"abc\",\"agent_id\":\"plan-1\",\"agent_type\":\"Plan\"}}",
+        // 无孤立时不变
+        let clean = json!({
             "messages": [
-                {"role": "user", "content": "Design the implementation plan"}
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tool_1", "name": "read", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"}]}
             ]
         });
-        assert!(detect_subagent(&body));
-    }
+        assert_eq!(sanitize_orphan_tool_results(clean.clone()), clean);
 
-    #[test]
-    fn test_detect_subagent_no_marker() {
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "Hello, please help me write code"}
-            ]
-        });
-        assert!(!detect_subagent(&body));
-    }
-
-    #[test]
-    fn test_detect_subagent_via_metadata_user_id() {
-        // fallback 信号: metadata.user_id 包含 "_agent_" 标记
-        let body = json!({
-            "metadata": {
-                "user_id": "session_abc123_agent_explore-1"
-            },
-            "messages": [
-                {"role": "user", "content": "Search for files"}
-            ]
-        });
-        assert!(detect_subagent(&body));
-    }
-
-    #[test]
-    fn test_detect_subagent_normal_user_id_not_matched() {
-        // 普通 session ID 不应被误判
-        let body = json!({
-            "metadata": {
-                "user_id": "session_abc123"
-            },
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ]
-        });
-        assert!(!detect_subagent(&body));
-    }
-
-    #[test]
-    fn test_classify_subagent_sets_agent_initiator() {
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "text", "text": "<system-reminder>\n{\"__SUBAGENT_MARKER__\":{\"session_id\":\"abc\",\"agent_id\":\"explore-1\",\"agent_type\":\"Explore\"}}\n</system-reminder>\nSearch for files"}
-                ]}
-            ]
-        });
-        let result = classify_request(&body, false, true, true);
-        assert_eq!(result.initiator, "agent");
-        assert!(result.is_subagent);
-    }
-
-    #[test]
-    fn test_classify_subagent_disabled_flag() {
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "text", "text": "<system-reminder>\n{\"__SUBAGENT_MARKER__\":{\"session_id\":\"abc\",\"agent_id\":\"explore-1\",\"agent_type\":\"Explore\"}}\n</system-reminder>\nSearch for files"}
-                ]}
-            ]
-        });
-        // subagent_detection=false → 不检测子代理
-        let result = classify_request(&body, false, true, false);
-        assert_eq!(result.initiator, "user");
-        assert!(!result.is_subagent);
-    }
-
-    // === sanitize_orphan_tool_results 测试 ===
-
-    #[test]
-    fn test_sanitize_orphan_tool_results_converts_orphans() {
-        let body = json!({
-            "messages": [
-                {"role": "user", "content": "Help me"},
-                {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "tool_1", "name": "read_file", "input": {}}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "tool_1", "content": "file contents"},
-                    {"type": "tool_result", "tool_use_id": "tool_orphan", "content": "orphan data"}
-                ]}
-            ]
-        });
-        let result = sanitize_orphan_tool_results(body);
-        let msgs = result["messages"].as_array().unwrap();
-        let last_content = msgs[2]["content"].as_array().unwrap();
-        // tool_1 保留为 tool_result
-        assert_eq!(last_content[0]["type"], "tool_result");
-        // tool_orphan 转为 text
-        assert_eq!(last_content[1]["type"], "text");
-        assert!(last_content[1]["text"]
-            .as_str()
-            .unwrap()
-            .contains("tool_orphan"));
-    }
-
-    #[test]
-    fn test_sanitize_orphan_tool_results_no_orphans() {
-        let body = json!({
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "tool_1", "name": "read_file", "input": {}}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"}
-                ]}
-            ]
-        });
-        let result = sanitize_orphan_tool_results(body.clone());
-        // 无孤立 tool_result，不应有变化
-        assert_eq!(result["messages"][1]["content"][0]["type"], "tool_result");
-    }
-
-    #[test]
-    fn test_sanitize_orphan_non_adjacent_assistant_tool_use_is_orphan() {
-        // tool_use 在更早的 assistant 中，但 tool_result 的紧邻上一条是另一个 assistant
-        // → 对 Anthropic 协议来说这个 tool_result 是 orphan
-        let body = json!({
+        // tool_use 在更早的 assistant 而非紧邻 assistant -> orphan
+        let non_adjacent = sanitize_orphan_tool_results(json!({
             "messages": [
                 {"role": "user", "content": "step 1"},
-                {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "old_tool", "name": "search", "input": {}}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "old_tool", "content": "found it"}
-                ]},
-                {"role": "assistant", "content": [
-                    {"type": "text", "text": "OK, now let me think..."}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "old_tool", "content": "stale ref"}
-                ]}
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "old_tool", "name": "s", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old_tool", "content": "found"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "thinking"}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old_tool", "content": "stale"}]}
             ]
-        });
-        let result = sanitize_orphan_tool_results(body);
-        let msgs = result["messages"].as_array().unwrap();
-        // messages[2]: 紧邻 assistant 有 old_tool → 保留
-        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
-        // messages[4]: 紧邻 assistant 无 tool_use → orphan → text
-        assert_eq!(msgs[4]["content"][0]["type"], "text");
-    }
+        }));
+        assert_eq!(
+            non_adjacent["messages"][2]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(non_adjacent["messages"][4]["content"][0]["type"], "text");
 
-    #[test]
-    fn test_sanitize_orphan_prev_not_assistant() {
-        // tool_result 紧邻上一条是 user（非 assistant）→ 全部 orphan
-        let body = json!({
+        // 紧邻上一条非 assistant（user -> user）-> orphan
+        let prev_user = sanitize_orphan_tool_results(json!({
             "messages": [
                 {"role": "user", "content": "first"},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "data"}
-                ]}
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "data"}]}
             ]
-        });
-        let result = sanitize_orphan_tool_results(body);
-        assert_eq!(result["messages"][1]["content"][0]["type"], "text");
-    }
+        }));
+        assert_eq!(prev_user["messages"][1]["content"][0]["type"], "text");
 
-    /// 关键场景：orphan tool_result（上下文压缩丢失了紧邻 tool_use）
-    /// 在分类时仍应被视为 agent continuation，不能因为后续的 sanitize
-    /// 将其转为 text 而变成 user 请求。
-    ///
-    /// 这个测试验证 classify_request 在原始（未 sanitize）的 body 上
-    /// 正确识别 orphan tool_result 为 agent。
-    #[test]
-    fn test_orphan_tool_result_classified_as_agent_before_sanitize() {
-        // 场景：最后一条 user 消息全是 tool_result，但紧邻的 assistant
-        // 消息里没有对应的 tool_use（因上下文压缩丢失了）
-        let body = json!({
+        // 空或缺失 tool_use_id -> orphan
+        let missing_id = sanitize_orphan_tool_results(json!({
             "messages": [
-                {"role": "assistant", "content": "I'll help you with that."},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tool_1", "name": "read", "input": {}}]},
                 {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "orphan_tool_1", "content": "file contents here"},
-                    {"type": "tool_result", "tool_use_id": "orphan_tool_2", "content": "another result"}
+                    {"type": "tool_result", "tool_use_id": "", "content": "empty"},
+                    {"type": "tool_result", "content": "missing"}
                 ]}
             ]
-        });
-        // 在原始 body 上分类 → 全是 tool_result → agent
-        let classification = classify_request(&body, false, false, false);
-        assert_eq!(classification.initiator, "agent");
-
-        // sanitize 后 → tool_result 变为 text → 如果再分类就会变成 user
-        let sanitized = sanitize_orphan_tool_results(body);
-        let classification_after = classify_request(&sanitized, false, false, false);
-        assert_eq!(
-            classification_after.initiator, "user",
-            "sanitize 后 orphan tool_result 变为 text，分类变成 user — \
-             这就是为什么分类必须在 sanitize 之前执行"
-        );
-    }
-
-    /// orphan tool_result + text 混合场景：
-    /// 分类器直接识别含 tool_result 的消息为 agent（无论是否有 text block），
-    /// 不依赖 merge 的执行顺序。即使 orphan tool_result 后续被 sanitize 转为 text，
-    /// 分类结果在此之前已经确定为 agent。
-    #[test]
-    fn test_orphan_tool_result_with_text_classified_as_agent() {
-        let body = json!({
-            "messages": [
-                {"role": "assistant", "content": "Processing..."},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "orphan_1", "content": "result data"},
-                    {"type": "text", "text": "Here's the output from the tool"}
-                ]}
-            ]
-        });
-        // 含有 tool_result → agent（无论是否有 text block）
-        let classification = classify_request(&body, false, false, false);
-        assert_eq!(classification.initiator, "agent");
-
-        // sanitize 后 orphan tool_result 变为 text → 纯 text → 分类会变成 user
-        // 但正确的执行顺序是先分类再 sanitize，所以这不是问题
-        let sanitized = sanitize_orphan_tool_results(body);
-        let classification_after = classify_request(&sanitized, false, false, false);
-        assert_eq!(classification_after.initiator, "user");
+        }));
+        assert_eq!(missing_id["messages"][1]["content"][0]["type"], "text");
+        assert_eq!(missing_id["messages"][1]["content"][1]["type"], "text");
     }
 
     #[test]
-    fn test_sanitize_orphan_empty_tool_use_id_is_orphan() {
-        // tool_use_id 为空或缺失 → 无法匹配任何 tool_use → orphan
-        let body = json!({
+    fn classify_must_run_before_sanitize_for_orphan_tool_results() {
+        // 无论纯 orphan tool_result 还是 orphan tool_result + text，
+        // 分类必须在 sanitize 之前执行才能正确判为 agent（sanitize 会把它们转成 text -> user）
+        for (case, content) in [
+            (
+                "orphan_only",
+                json!([
+                    {"type": "tool_result", "tool_use_id": "orphan_1", "content": "a"},
+                    {"type": "tool_result", "tool_use_id": "orphan_2", "content": "b"}
+                ]),
+            ),
+            (
+                "orphan_with_text",
+                json!([
+                    {"type": "tool_result", "tool_use_id": "orphan_1", "content": "a"},
+                    {"type": "text", "text": "output"}
+                ]),
+            ),
+        ] {
+            let body = json!({
+                "messages": [
+                    {"role": "assistant", "content": "Processing..."},
+                    {"role": "user", "content": content}
+                ]
+            });
+            assert_eq!(
+                classify_request(&body, false, false, false).initiator,
+                "agent",
+                "{case}: before sanitize"
+            );
+            let sanitized = sanitize_orphan_tool_results(body);
+            assert_eq!(
+                classify_request(&sanitized, false, false, false).initiator,
+                "user",
+                "{case}: after sanitize"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_thinking_blocks_cases() {
+        // 多轮 assistant 移除 thinking / redacted_thinking，保持块顺序，保留非 thinking 块 signature，
+        // 仅 thinking 的消息留空数组，不动 user 消息和字符串 content
+        let result = strip_thinking_blocks(json!({
             "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "tool_1", "name": "read", "input": {}}
+                {"role": "user", "content": [
+                    {"type": "thinking", "thinking": "keep user"},
+                    {"type": "text", "text": "q1"}
                 ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "", "content": "empty id"},
-                    {"type": "tool_result", "content": "missing id field"}
-                ]}
-            ]
-        });
-        let result = sanitize_orphan_tool_results(body);
-        let content = result["messages"][1]["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[1]["type"], "text");
-    }
-
-    // === strip_thinking_blocks 测试 ===
-
-    #[test]
-    fn test_strip_thinking_removes_assistant_thinking_blocks() {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
                 {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "let me ponder", "signature": "sig"},
-                    {"type": "redacted_thinking", "data": "opaque"},
-                    {"type": "text", "text": "hello"},
-                    {"type": "tool_use", "id": "t1", "name": "read", "input": {}}
-                ]}
-            ]
-        });
-        let result = strip_thinking_blocks(body);
-        let content = result["messages"][1]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[1]["type"], "tool_use");
-    }
-
-    #[test]
-    fn test_strip_thinking_leaves_user_messages_untouched() {
-        // 仅处理 assistant，user 的 thinking 块（极少见，但可能）不动
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "thinking", "thinking": "x"},
-                    {"type": "text", "text": "hi"}
-                ]}
-            ]
-        });
-        let result = strip_thinking_blocks(body);
-        let content = result["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-    }
-
-    #[test]
-    fn test_strip_thinking_handles_missing_messages() {
-        let body = serde_json::json!({ "model": "claude-3-5-sonnet" });
-        let result = strip_thinking_blocks(body.clone());
-        assert_eq!(result, body);
-    }
-
-    #[test]
-    fn test_strip_thinking_leaves_empty_content_array() {
-        // 仅含 thinking 的 assistant 消息剥完后 content 为空——保留上游自处理
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "solo"}
-                ]}
-            ]
-        });
-        let result = strip_thinking_blocks(body);
-        let content = result["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 0);
-    }
-
-    #[test]
-    fn test_strip_thinking_preserves_signature_on_non_thinking_blocks() {
-        // signature 留给 thinking_rectifier 在错误路径处理，此处不动
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "t1", "name": "x", "input": {}, "signature": "s"}
-                ]}
-            ]
-        });
-        let result = strip_thinking_blocks(body);
-        let block = &result["messages"][0]["content"][0];
-        assert_eq!(block["signature"], "s");
-    }
-
-    #[test]
-    fn test_strip_thinking_multiple_assistant_turns() {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "q1"}]},
-                {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "a"},
-                    {"type": "text", "text": "r1"}
-                ]},
-                {"role": "user", "content": [{"type": "text", "text": "q2"}]},
-                {"role": "assistant", "content": [
-                    {"type": "redacted_thinking", "data": "x"},
-                    {"type": "text", "text": "r2"}
-                ]}
-            ]
-        });
-        let result = strip_thinking_blocks(body);
-        let a1 = result["messages"][1]["content"].as_array().unwrap();
-        let a2 = result["messages"][3]["content"].as_array().unwrap();
-        assert_eq!(a1.len(), 1);
-        assert_eq!(a1[0]["text"], "r1");
-        assert_eq!(a2.len(), 1);
-        assert_eq!(a2[0]["text"], "r2");
-    }
-
-    #[test]
-    fn test_strip_thinking_ignores_string_content() {
-        // assistant.content 是字符串而非 block 数组 — 历史请求或极简客户端会这样
-        // 不应崩溃，也不应转换结构
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": "plain text response"}
-            ]
-        });
-        let result = strip_thinking_blocks(body.clone());
-        assert_eq!(result, body);
-    }
-
-    #[test]
-    fn test_strip_thinking_preserves_block_order() {
-        let body = serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "pre"},
+                    {"type": "thinking", "thinking": "pre", "signature": "sig"},
                     {"type": "text", "text": "A"},
-                    {"type": "tool_use", "id": "t1", "name": "x", "input": {}},
+                    {"type": "tool_use", "id": "t1", "name": "read", "input": {}, "signature": "keep_sig"},
                     {"type": "redacted_thinking", "data": "mid"},
                     {"type": "text", "text": "B"}
-                ]}
+                ]},
+                {"role": "assistant", "content": [{"type": "thinking", "thinking": "solo"}]},
+                {"role": "assistant", "content": "plain text response"}
             ]
-        });
-        let result = strip_thinking_blocks(body);
-        let content = result["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 3);
-        assert_eq!(content[0]["text"], "A");
-        assert_eq!(content[1]["type"], "tool_use");
-        assert_eq!(content[2]["text"], "B");
+        }));
+        let msgs = result["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 2);
+        let a1 = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(a1.len(), 3);
+        assert_eq!(a1[0]["text"], "A");
+        assert_eq!(a1[1]["type"], "tool_use");
+        assert_eq!(a1[1]["signature"], "keep_sig");
+        assert_eq!(a1[2]["text"], "B");
+        assert_eq!(msgs[2]["content"].as_array().unwrap().len(), 0);
+        assert_eq!(msgs[3]["content"], "plain text response");
+
+        let no_messages = json!({ "model": "claude-3-5-sonnet" });
+        assert_eq!(strip_thinking_blocks(no_messages.clone()), no_messages);
     }
 }

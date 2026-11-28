@@ -469,249 +469,71 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_deserialize_auto_response_with_model_object() {
-        let fixture = json!({
-            "session_token": "header.eyJleHAiOjE3OTQxMTY0NTIsImF1dG9fc2Vzc2lvbl9pZCI6IjEyMyIsImF1dG9fdGllciI6ImJhbGFuY2UiLCJleGVjdXRpb25fbW9kZSI6ImZ1c2lvbiJ9.sig",
+    fn deserialize_auto_response_and_redact_debug() {
+        // Object selected_model + Debug 必须脱敏 session_token
+        let obj_resp: CopilotAutoResponse = serde_json::from_value(json!({
+            "session_token": "header.eyJleHAiOjE3OTQxMTY0NTJ9.sig",
             "selected_model": {
                 "id": "gpt-5.6-luna",
                 "name": "Luna",
                 "capabilities": {"streaming": true}
             },
-            "selection_reason": "scored best for code intent",
-        });
-
-        let resp: CopilotAutoResponse = serde_json::from_value(fixture).unwrap();
-        assert_eq!(resp.selected_model.model_id(), "gpt-5.6-luna");
-
-        // Test debug does not leak session_token
-        let debug_str = format!("{resp:?}");
+            "selection_reason": "scored best for code intent"
+        }))
+        .unwrap();
+        assert_eq!(obj_resp.selected_model.model_id(), "gpt-5.6-luna");
+        let debug_str = format!("{obj_resp:?}");
         assert!(debug_str.contains("[REDACTED]"));
         assert!(!debug_str.contains("eyJleHAi"));
-    }
 
-    #[test]
-    fn test_deserialize_auto_response_with_model_string() {
-        let fixture = json!({
+        // String selected_model + 忽略未契约字段 + 顶层 expires_at
+        let str_resp: CopilotAutoResponse = serde_json::from_value(json!({
             "session_token": "token123",
-            "selected_model": "gpt-5.6-luna"
-        });
-
-        let resp: CopilotAutoResponse = serde_json::from_value(fixture).unwrap();
-        assert_eq!(resp.selected_model.model_id(), "gpt-5.6-luna");
-    }
-
-    #[test]
-    fn test_parsed_session_token() {
-        let payload = json!({
-            "exp": 1794116452,
-            "auto_session_id": "session-xyz",
-            "auto_tier": "balance"
-        });
-        let payload_str = serde_json::to_string(&payload).unwrap();
-        let b64 = URL_SAFE_NO_PAD.encode(payload_str.as_bytes());
-        let token = format!("eyJhbGciOiJFUzI1NiJ9.{b64}.sig");
-
-        let parsed = ParsedSessionToken::parse(&token).unwrap();
-        assert_eq!(parsed.exp, Some(1794116452));
-        assert_eq!(parsed.exp, Some(1794116452));
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_anthropic() {
-        let req = json!({
-            "model": "claude-3-5-sonnet",
-            "messages": [
-                {"role": "user", "content": "What is 2+2?"}
-            ]
-        });
-        let (prompt, has_image) =
-            extract_prompt_summary_for_auto(&req, RequestProtocol::AnthropicMessages);
-        assert_eq!(prompt, "What is 2+2?");
-        assert!(!has_image);
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_responses() {
-        let req = json!({
-            "model": "auto",
-            "input": [
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "Fix this bug"}
-                    ]
-                }
-            ]
-        });
-        let (prompt, has_image) =
-            extract_prompt_summary_for_auto(&req, RequestProtocol::CodexResponses);
-        assert_eq!(prompt, "Fix this bug");
-        assert!(!has_image);
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_chat() {
-        let req = json!({
-            "model": "auto",
-            "messages": [
-                {"role": "system", "content": "You are a bot"},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Explain this diagram"},
-                    {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
-                ]}
-            ]
-        });
-        let (prompt, has_image) =
-            extract_prompt_summary_for_auto(&req, RequestProtocol::ChatCompletions);
-        assert_eq!(prompt, "Explain this diagram");
-        assert!(has_image);
-    }
-
-    #[test]
-    fn test_utf8_cjk_truncation_does_not_panic() {
-        // Chinese character '中' is 3 bytes (0xE4 0xB8 0xAD).
-        // 1334 * 3 = 4002 bytes. At 4000 bytes, it cuts in the middle of a character.
-        let large_cjk = "中".repeat(1500);
-        let req = json!({
-            "messages": [
-                {"role": "user", "content": large_cjk}
-            ]
-        });
-        let (prompt, _) = extract_prompt_summary_for_auto(&req, RequestProtocol::AnthropicMessages);
-        assert!(prompt.len() <= 4000);
-        // Valid UTF-8 check
-        assert!(std::str::from_utf8(prompt.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn test_long_history_preserves_latest_user_task() {
-        // Turn 1 is very long (> 4000 bytes)
-        let turn1 = "A".repeat(5000);
-        let turn2 = "LATEST_USER_QUESTION: please refactor my code";
-        let req = json!({
-            "messages": [
-                {"role": "user", "content": turn1},
-                {"role": "assistant", "content": "Done."},
-                {"role": "user", "content": turn2}
-            ]
-        });
-        let (prompt, _) = extract_prompt_summary_for_auto(&req, RequestProtocol::AnthropicMessages);
-        assert!(
-            prompt.ends_with("LATEST_USER_QUESTION: please refactor my code"),
-            "prompt should preserve the latest task, but was: {prompt}"
+            "selected_model": "gpt-5.6-luna",
+            "multi_turn": {"enabled": true, "backoff_coefficient": 2.5},
+            "expires_at": "2020-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(str_resp.selected_model.model_id(), "gpt-5.6-luna");
+        assert_eq!(
+            parse_expires_at_field(str_resp.expires_at.as_ref()).unwrap(),
+            Some(1577836800)
         );
-        assert!(prompt.len() <= 4000);
     }
 
     #[test]
-    fn test_parsed_session_token_with_base64_padding() {
-        let payload = json!({
-            "exp": 1794116452
-        });
-        // Force base64 with '=' padding
+    fn parsed_session_token_handles_url_safe_padded_and_float_exp() {
+        let jwt = |b64: String| format!("eyJhbGciOiJFUzI1NiJ9.{b64}.sig");
+
+        let url_safe =
+            URL_SAFE_NO_PAD.encode(json!({"exp": 1794116452, "auto_session_id": "s"}).to_string());
+        assert_eq!(
+            ParsedSessionToken::parse(&jwt(url_safe)).unwrap().exp,
+            Some(1794116452)
+        );
+
+        let float_exp = URL_SAFE_NO_PAD.encode(json!({"exp": 1794116452.5}).to_string());
+        assert_eq!(
+            ParsedSessionToken::parse(&jwt(float_exp)).unwrap().exp,
+            Some(1794116452)
+        );
+
+        // Standard base64 with '=' padding
         use base64::engine::general_purpose::STANDARD;
-        use base64::Engine;
-        let mut payload = payload;
-        let mut padding = String::new();
-        let b64_padded = loop {
-            payload["padding"] = json!(padding);
+        let mut payload = json!({"exp": 1794116452});
+        let mut pad = String::new();
+        let padded = loop {
+            payload["padding"] = json!(pad);
             let encoded = STANDARD.encode(serde_json::to_vec(&payload).unwrap());
             if encoded.contains('=') {
                 break encoded;
             }
-            padding.push('x');
+            pad.push('x');
         };
-
-        let token = format!("eyJhbGciOiJFUzI1NiJ9.{b64_padded}.sig");
-        let parsed = ParsedSessionToken::parse(&token).unwrap();
-        assert_eq!(parsed.exp, Some(1794116452));
-    }
-
-    #[test]
-    fn test_deserialize_auto_response_ignores_uncontracted_multi_turn_fields() {
-        let fixture = json!({
-            "session_token": "token123",
-            "selected_model": "gpt-5.6-luna",
-            "multi_turn": {
-                "enabled": true,
-                "backoff_coefficient": 2.5
-            }
-        });
-        let resp: CopilotAutoResponse = serde_json::from_value(fixture).unwrap();
-        assert_eq!(resp.selected_model.model_id(), "gpt-5.6-luna");
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_responses_plain_string() {
-        let req = json!({
-            "input": [
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": "A direct string content without array"
-                }
-            ]
-        });
-        let (prompt, _) = extract_prompt_summary_for_auto(&req, RequestProtocol::CodexResponses);
-        assert_eq!(prompt, "A direct string content without array");
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_responses_top_level_string_input() {
-        let req = json!({
-            "input": "Direct top-level input string"
-        });
-        let (prompt, has_image) =
-            extract_prompt_summary_for_auto(&req, RequestProtocol::CodexResponses);
-        assert_eq!(prompt, "Direct top-level input string");
-        assert!(!has_image);
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_responses_top_level_items() {
-        let req = json!({
-            "input": [
-                {"type": "input_text", "text": "Top level item"},
-                {"type": "input_image", "image_url": "https://example.com/test.png"}
-            ]
-        });
-        let (prompt, has_image) =
-            extract_prompt_summary_for_auto(&req, RequestProtocol::CodexResponses);
-        assert_eq!(prompt, "Top level item");
-        assert!(has_image);
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_responses_standard_untyped_user_message() {
-        let req = json!({
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Standard Responses text"},
-                        {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
-                    ]
-                }
-            ]
-        });
-        let (prompt, has_image) =
-            extract_prompt_summary_for_auto(&req, RequestProtocol::CodexResponses);
-        assert_eq!(prompt, "Standard Responses text");
-        assert!(has_image);
-    }
-
-    #[test]
-    fn test_parsed_session_token_with_float_exp() {
-        let payload = json!({
-            "exp": 1794116452.5,
-            "auto_session_id": "session-xyz"
-        });
-        let payload_str = serde_json::to_string(&payload).unwrap();
-        let b64 = URL_SAFE_NO_PAD.encode(payload_str.as_bytes());
-        let token = format!("eyJhbGciOiJFUzI1NiJ9.{b64}.sig");
-        let parsed = ParsedSessionToken::parse(&token).unwrap();
-        assert_eq!(parsed.exp, Some(1794116452));
+        assert_eq!(
+            ParsedSessionToken::parse(&jwt(padded)).unwrap().exp,
+            Some(1794116452)
+        );
     }
 
     #[test]
@@ -749,106 +571,152 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_auto_response_with_top_level_expires_at() {
-        let fixture = json!({
-            "session_token": "token123",
-            "selected_model": "gpt-5.6-luna",
-            "expires_at": "2020-01-01T00:00:00Z"
-        });
-        let resp: CopilotAutoResponse = serde_json::from_value(fixture).unwrap();
-        assert_eq!(
-            parse_expires_at_field(resp.expires_at.as_ref()).unwrap(),
-            Some(1577836800)
+    fn extract_prompt_summary_across_protocols_and_images() {
+        for (case, protocol, req, expected_prompt, expected_image) in [
+            (
+                "anthropic_plain",
+                RequestProtocol::AnthropicMessages,
+                json!({"messages": [{"role": "user", "content": "What is 2+2?"}]}),
+                "What is 2+2?",
+                false,
+            ),
+            (
+                "anthropic_multi_turn",
+                RequestProtocol::AnthropicMessages,
+                json!({"messages": [
+                    {"role": "user", "content": "First question"},
+                    {"role": "assistant", "content": "First answer"},
+                    {"role": "user", "content": [{"type": "text", "text": "Follow up question"}]}
+                ]}),
+                "First question\nFollow up question",
+                false,
+            ),
+            (
+                "chat_with_image",
+                RequestProtocol::ChatCompletions,
+                json!({"messages": [
+                    {"role": "system", "content": "You are a bot"},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "Explain this diagram"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+                    ]}
+                ]}),
+                "Explain this diagram",
+                true,
+            ),
+            (
+                "responses_input_text",
+                RequestProtocol::CodexResponses,
+                json!({"input": [{"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "Fix this bug"}
+                ]}]}),
+                "Fix this bug",
+                false,
+            ),
+            (
+                "responses_message_plain_string",
+                RequestProtocol::CodexResponses,
+                json!({"input": [{"type": "message", "role": "user", "content": "Direct string"}]}),
+                "Direct string",
+                false,
+            ),
+            (
+                "responses_top_level_string",
+                RequestProtocol::CodexResponses,
+                json!({"input": "Direct top-level input string"}),
+                "Direct top-level input string",
+                false,
+            ),
+            (
+                "responses_top_level_items_with_image",
+                RequestProtocol::CodexResponses,
+                json!({"input": [
+                    {"type": "input_text", "text": "Top level item"},
+                    {"type": "input_image", "image_url": "https://example.com/test.png"}
+                ]}),
+                "Top level item",
+                true,
+            ),
+            (
+                "responses_untyped_user_with_image",
+                RequestProtocol::CodexResponses,
+                json!({"input": [{"role": "user", "content": [
+                    {"type": "text", "text": "Standard Responses text"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+                ]}]}),
+                "Standard Responses text",
+                true,
+            ),
+        ] {
+            let (prompt, has_image) = extract_prompt_summary_for_auto(&req, protocol);
+            assert_eq!(prompt, expected_prompt, "{case}");
+            assert_eq!(has_image, expected_image, "{case}");
+        }
+    }
+
+    #[test]
+    fn extract_prompt_summary_budget_utf8_and_instruction_priority() {
+        // CJK 3 字节边界截断不 panic
+        let (cjk, _) = extract_prompt_summary_for_auto(
+            &json!({"messages": [{"role": "user", "content": "中".repeat(1500)}]}),
+            RequestProtocol::AnthropicMessages,
         );
-    }
+        assert!(cjk.len() <= 4000);
+        assert!(std::str::from_utf8(cjk.as_bytes()).is_ok());
 
-    #[test]
-    fn test_extract_prompt_summary_multi_turn_aggregation() {
-        let req = json!({
-            "messages": [
-                {"role": "user", "content": "First question"},
-                {"role": "assistant", "content": "First answer"},
-                {"role": "user", "content": [{"type": "text", "text": "Follow up question"}]}
-            ]
-        });
-        let (prompt, _) = extract_prompt_summary_for_auto(&req, RequestProtocol::AnthropicMessages);
-        assert_eq!(prompt, "First question\nFollow up question");
-    }
+        // 长历史保留最新用户任务
+        let (latest, _) = extract_prompt_summary_for_auto(
+            &json!({"messages": [
+                {"role": "user", "content": "A".repeat(5000)},
+                {"role": "assistant", "content": "Done."},
+                {"role": "user", "content": "LATEST_USER_QUESTION: please refactor my code"}
+            ]}),
+            RequestProtocol::AnthropicMessages,
+        );
+        assert!(latest.ends_with("LATEST_USER_QUESTION: please refactor my code"));
+        assert!(latest.len() <= 4000);
 
-    #[test]
-    fn test_extract_prompt_summary_message_with_instruction_and_large_code_block() {
+        // 指令 + 超长代码块：Anthropic 与 Responses 都保留开头指令
         let large_code =
             "fn do_something() {\n".to_string() + &"    println!(\"hello\");\n".repeat(300) + "}";
         assert!(large_code.len() > 4000);
-        let req = json!({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "请审查下面代码"},
-                        {"type": "text", "text": large_code}
-                    ]
-                }
-            ]
-        });
-        let (prompt, _) = extract_prompt_summary_for_auto(&req, RequestProtocol::AnthropicMessages);
-        assert!(
-            prompt.starts_with("请审查下面代码"),
-            "Prompt must preserve user instruction at the start of the message, but was: {prompt}"
-        );
-        assert!(prompt.len() <= 4000);
-        assert!(std::str::from_utf8(prompt.as_bytes()).is_ok());
+        for (protocol, req) in [
+            (
+                RequestProtocol::AnthropicMessages,
+                json!({"messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "请审查下面代码"},
+                    {"type": "text", "text": large_code}
+                ]}]}),
+            ),
+            (
+                RequestProtocol::CodexResponses,
+                json!({"input": [{"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "请审查下面代码"},
+                    {"type": "input_text", "text": large_code}
+                ]}]}),
+            ),
+        ] {
+            let (prompt, _) = extract_prompt_summary_for_auto(&req, protocol);
+            assert!(prompt.starts_with("请审查下面代码"), "{protocol:?}");
+            assert!(prompt.len() <= 4000, "{protocol:?}");
+            assert!(std::str::from_utf8(prompt.as_bytes()).is_ok());
+        }
     }
 
     #[test]
-    fn test_extract_prompt_summary_responses_message_with_instruction_and_large_code_block() {
-        let large_code =
-            "fn do_something() {\n".to_string() + &"    println!(\"hello\");\n".repeat(300) + "}";
-        assert!(large_code.len() > 4000);
-        let req = json!({
-            "input": [
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "请审查下面代码"},
-                        {"type": "input_text", "text": large_code}
-                    ]
-                }
-            ]
-        });
-        let (prompt, _) = extract_prompt_summary_for_auto(&req, RequestProtocol::CodexResponses);
-        assert!(
-            prompt.starts_with("请审查下面代码"),
-            "Prompt must preserve user instruction at the start of the message, but was: {prompt}"
-        );
-        assert!(prompt.len() <= 4000);
-        assert!(std::str::from_utf8(prompt.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn test_extract_prompt_summary_skips_claude_code_system_reminders() {
-        // Claude Code's first turn: injected context first, the actual task last.
+    fn extract_prompt_summary_strips_closed_system_reminders_only() {
         let reminder = format!(
             "<system-reminder>\n# claudeMd\n{}</system-reminder>",
             "Project rule: keep commits atomic.\n".repeat(150)
         );
         assert!(reminder.len() > 4000);
-        let req = json!({
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": reminder},
-                    {"type": "text", "text": "Fix the failing login test\n<system-reminder>todo list is empty</system-reminder>"}
-                ]
-            }]
-        });
+        let req = json!({"messages": [{"role": "user", "content": [
+            {"type": "text", "text": reminder},
+            {"type": "text", "text": "Fix the failing login test\n<system-reminder>todo list is empty</system-reminder>"}
+        ]}]});
         let (prompt, _) = extract_prompt_summary_for_auto(&req, RequestProtocol::AnthropicMessages);
         assert_eq!(prompt, "Fix the failing login test");
-    }
 
-    #[test]
-    fn test_strip_system_reminders_keeps_unclosed_tags() {
         assert_eq!(
             strip_system_reminders("a <system-reminder>b</system-reminder> c"),
             "a  c"
