@@ -265,7 +265,10 @@ fn parse_mcp_deeplink_and_apps_stay_in_sync_for_all_mcp_clients() {
         assert_eq!(parsed.enabled_apps(), vec![app]);
         checked += 1;
     }
-    assert!(checked > 0);
+    let expected_mcp_count = AppType::all()
+        .filter(|app| !matches!(app, AppType::OpenClaw | AppType::ClaudeDesktop))
+        .count();
+    assert_eq!(checked, expected_mcp_count);
 
     // 多目标、别名、OpenClaw 静默忽略、非法名称拒绝
     let multi = parse_deeplink_url(&format!(
@@ -278,12 +281,17 @@ fn parse_mcp_deeplink_and_apps_stay_in_sync_for_all_mcp_clients() {
     // OpenClaw 不支持 MCP：解析放行但单独使用时无有效目标
     assert!(parse_mcp_apps("openclaw").is_err());
 
-    assert!(parse_deeplink_url(&format!(
-        "ccswitch://v1/import?resource=mcp&apps=invalid&config={config}"
-    ))
-    .is_err());
-    let err = parse_mcp_apps("invalid").unwrap_err();
-    assert!(err.to_string().contains("Invalid app"), "{err}");
+    for bad in ["invalid", "agy,invalid"] {
+        assert!(
+            parse_deeplink_url(&format!(
+                "ccswitch://v1/import?resource=mcp&apps={bad}&config={config}"
+            ))
+            .is_err(),
+            "{bad}"
+        );
+        let err = parse_mcp_apps(bad).unwrap_err();
+        assert!(err.to_string().contains("Invalid app"), "{bad}: {err}");
+    }
 }
 
 #[test]
@@ -943,14 +951,16 @@ fn codex_link_config_rejects_untrusted_sources_and_cross_origin_catalog() {
         assert!(err.to_string().contains(key), "{key}: {err}");
     }
 
-    // 链接自带 Key 时丢弃 env_key，切换走 bearer token
+    // 链接自带 Key 时丢弃 env_key，缺 name / wire_api 时回落到卡片名与 responses，切换走 bearer token
     let with_env_key = json!({
         "config": "[model_providers.custom]\nbase_url = \"https://api.relay.example/v1\"\nenv_key = \"RELAY_API_KEY\"\n"
     });
     let settings = import_codex_with_config(with_env_key.clone(), None, None).unwrap();
-    assert!(row_config(&settings)["model_providers"]["custom"]
-        .get("env_key")
-        .is_none());
+    let doc = row_config(&settings);
+    let table = &doc["model_providers"]["custom"];
+    assert!(table.get("env_key").is_none());
+    assert_eq!(table["name"].as_str(), Some("Relay"));
+    assert_eq!(table["wire_api"].as_str(), Some("responses"));
     assert_eq!(
         projected_route_table(&settings)["experimental_bearer_token"].as_str(),
         Some("sk-link")
@@ -1492,8 +1502,8 @@ fn agy_deeplink_mcp_import_merges_apps_and_writes_native_config() {
     let state = AppState::new(db.clone());
     let config = BASE64_URL_SAFE_NO_PAD
         .encode(r#"{"mcpServers":{"fixture":{"command":"echo","args":["fixture"]}}}"#);
-    // First import belongs to another app, then the same ID is enabled for agy.
-    for apps in ["codex", "agy"] {
+    // First import belongs to another app, then the same ID is merged with multiple apps.
+    for apps in ["codex", "agy,gemini"] {
         let request = parse_deeplink_url(&format!(
             "ccswitch://v1/import?resource=mcp&apps={apps}&config={config}"
         ))
@@ -1503,7 +1513,7 @@ fn agy_deeplink_mcp_import_merges_apps_and_writes_native_config() {
         assert!(result.failed.is_empty());
     }
     let rows = db.get_all_mcp_servers().unwrap();
-    assert!(rows["fixture"].apps.agy && rows["fixture"].apps.codex);
+    assert!(rows["fixture"].apps.codex && rows["fixture"].apps.agy && rows["fixture"].apps.gemini);
     let native: serde_json::Value = serde_json::from_slice(
         &std::fs::read(crate::config::get_home_dir().join(".gemini/config/mcp_config.json"))
             .unwrap(),
